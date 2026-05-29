@@ -1,0 +1,216 @@
+import swisseph as swe
+from datetime import datetime
+
+from astro.data_loader import (
+    VARAS,
+    TITHIS_DATA,
+    NAKSHATRAS_DATA,
+    MOON_SIGNS
+)
+
+from astro.special_conditions import calculate_gandanta
+from astro.yogas import calculate_moon_yogas
+from astro.muhurta import calculate_day_periods
+
+
+TITHIS = [
+    "Pratipada", "Dvitiya", "Tritiya", "Chaturthi", "Panchami",
+    "Shashthi", "Saptami", "Ashtami", "Navami", "Dashami",
+    "Ekadashi", "Dvadashi", "Trayodashi", "Chaturdashi", "Purnima",
+    "Pratipada", "Dvitiya", "Tritiya", "Chaturthi", "Panchami",
+    "Shashthi", "Saptami", "Ashtami", "Navami", "Dashami",
+    "Ekadashi", "Dvadashi", "Trayodashi", "Chaturdashi", "Amavasya"
+]
+
+
+NAKSHATRAS = [
+    "Ashwini", "Bharani", "Krittika", "Rohini", "Mrigashira",
+    "Ardra", "Punarvasu", "Pushya", "Ashlesha", "Magha",
+    "Purva Phalguni", "Uttara Phalguni", "Hasta", "Chitra",
+    "Swati", "Vishakha", "Anuradha", "Jyeshtha", "Mula",
+    "Purva Ashadha", "Uttara Ashadha", "Shravana", "Dhanishta",
+    "Shatabhisha", "Purva Bhadrapada", "Uttara Bhadrapada", "Revati"
+]
+
+
+def normalize(deg):
+    return deg % 360
+
+
+def calculate_panchanga(
+    year,
+    month,
+    day,
+    latitude,
+    longitude,
+    timezone,
+    hour=9,
+    minute=0
+):
+    swe.set_sid_mode(swe.SIDM_LAHIRI)
+
+    local_hour = hour + minute / 60
+    utc_hour = local_hour - timezone
+
+    jd = swe.julday(
+        year,
+        month,
+        day,
+        utc_hour
+    )
+
+    flags = swe.FLG_SWIEPH | swe.FLG_SIDEREAL
+
+    sun = normalize(
+        swe.calc_ut(jd, swe.SUN, flags)[0][0]
+    )
+
+    moon = normalize(
+        swe.calc_ut(jd, swe.MOON, flags)[0][0]
+    )
+
+    mars = normalize(
+        swe.calc_ut(jd, swe.MARS, flags)[0][0]
+    )
+
+    jupiter = normalize(
+        swe.calc_ut(jd, swe.JUPITER, flags)[0][0]
+    )
+
+    venus = normalize(
+        swe.calc_ut(jd, swe.VENUS, flags)[0][0]
+    )
+
+    saturn = normalize(
+        swe.calc_ut(jd, swe.SATURN, flags)[0][0]
+    )
+
+    mean_node = normalize(
+        swe.calc_ut(jd, swe.MEAN_NODE, flags)[0][0]
+    )
+
+    rahu = mean_node
+    ketu = normalize(mean_node + 180)
+
+    diff = normalize(moon - sun)
+
+    tithi_index = int(diff // 12)
+    nakshatra_index = int(moon // (360 / 27))
+
+    dt = datetime(year, month, day)
+
+    vara_key = dt.strftime("%A")
+
+    day_periods = calculate_day_periods(
+        year=year,
+        month=month,
+        day=day,
+        latitude=latitude,
+        longitude=longitude,
+        timezone=timezone,
+        hour=hour,
+        minute=minute,
+    )
+
+    tithi_number = tithi_index + 1
+    tithi_key = str(tithi_number)
+
+    nakshatra_key = NAKSHATRAS[nakshatra_index]
+
+    degree_in_nakshatra = moon % (360 / 27)
+
+    gandanta = calculate_gandanta(
+        nakshatra_key,
+        degree_in_nakshatra
+    )
+
+    moon_rashi_number = int(moon // 30) + 1
+
+    chart_data = {
+        "planets": {
+
+            "Mo": {
+                "longitude": moon,
+                "rashi_number": moon_rashi_number,
+            },
+
+            "Ma": {
+                "longitude": mars,
+                "rashi_number": int(mars // 30) + 1,
+            },
+
+            "Ju": {
+                "longitude": jupiter,
+                "rashi_number": int(jupiter // 30) + 1,
+            },
+
+            "Ve": {
+                "longitude": venus,
+                "rashi_number": int(venus // 30) + 1,
+            },
+
+            "Sa": {
+                "longitude": saturn,
+                "rashi_number": int(saturn // 30) + 1,
+            },
+
+            "Ra": {
+                "longitude": rahu,
+                "rashi_number": int(rahu // 30) + 1,
+            },
+
+            "Ke": {
+                "longitude": ketu,
+                "rashi_number": int(ketu // 30) + 1,
+            },
+        }
+    }
+
+    yogas = calculate_moon_yogas(chart_data)
+
+    return {
+
+        "date": f"{year}-{month:02d}-{day:02d}",
+
+        "calculation_time_local": f"{hour:02d}:{minute:02d}",
+
+        "location": {
+            "timezone": timezone,
+            "latitude": latitude,
+            "longitude": longitude,
+        },
+
+        "vara": {
+            "key": vara_key,
+            "data": VARAS.get(vara_key),
+        },
+
+        "tithi": {
+            "number": tithi_number,
+            "sanskrit": TITHIS[tithi_index],
+            "data": TITHIS_DATA.get(tithi_key),
+        },
+
+        "moon": {
+            "longitude": round(moon, 4),
+            "rashi_number": moon_rashi_number,
+            "data": MOON_SIGNS[str(moon_rashi_number)],
+        },
+
+        "nakshatra": {
+            "number": nakshatra_index + 1,
+            "key": nakshatra_key,
+            "degree_in_nakshatra": round(
+                degree_in_nakshatra,
+                4
+            ),
+            "data": NAKSHATRAS_DATA.get(
+                nakshatra_key
+            ),
+            "gandanta": gandanta,
+        },
+
+        "muhurta": day_periods,
+
+        "yogas": yogas,
+    }
