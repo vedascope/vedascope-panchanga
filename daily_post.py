@@ -1,14 +1,12 @@
 import argparse
-import json
 import logging
 import os
 import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import requests
 
 from astro.chart import calculate_chart
 from astro.panchanga import calculate_panchanga
@@ -177,78 +175,63 @@ def build_daily_text(panchanga):
     return text
 
 
-def telegram_request(method, bot_token, fields, files=None):
-    url = f"https://api.telegram.org/bot{bot_token}/{method}"
-
-    if not files:
-        data = urllib.parse.urlencode(fields).encode("utf-8")
-        request = urllib.request.Request(url, data=data)
-    else:
-        boundary = "----VedaScopePanchangaBoundary"
-        body = bytearray()
-
-        for name, value in fields.items():
-            body.extend(f"--{boundary}\r\n".encode("utf-8"))
-            body.extend(
-                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8")
-            )
-            body.extend(str(value).encode("utf-8"))
-            body.extend(b"\r\n")
-
-        for name, path in files.items():
-            file_path = Path(path)
-            body.extend(f"--{boundary}\r\n".encode("utf-8"))
-            body.extend(
-                (
-                    f'Content-Disposition: form-data; name="{name}"; '
-                    f'filename="{file_path.name}"\r\n'
-                ).encode("utf-8")
-            )
-            body.extend(b"Content-Type: image/png\r\n\r\n")
-            body.extend(file_path.read_bytes())
-            body.extend(b"\r\n")
-
-        body.extend(f"--{boundary}--\r\n".encode("utf-8"))
-        request = urllib.request.Request(url, data=bytes(body))
-        request.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-
+def check_telegram_response(response, method):
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Telegram {method} failed: HTTP {exc.code}: {error_body}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Telegram {method} failed: {exc}") from exc
+        payload = response.json()
+    except ValueError as exc:
+        LOGGER.error("Telegram %s non-JSON response: %s", method, response.text)
+        raise RuntimeError(
+            f"Telegram {method} returned non-JSON response: {response.text}"
+        ) from exc
+
+    if not response.ok:
+        LOGGER.error("Telegram %s HTTP error response: %s", method, response.text)
+        raise RuntimeError(
+            f"Telegram {method} failed: HTTP {response.status_code}: {response.text}"
+        )
 
     if not payload.get("ok"):
-        raise RuntimeError(f"Telegram {method} failed: {payload}")
+        LOGGER.error("Telegram %s ok=false response: %s", method, response.text)
+        raise RuntimeError(f"Telegram {method} failed: {response.text}")
 
+    LOGGER.info("Telegram %s response: %s", method, response.text)
     return payload
 
 
 def send_photo(bot_token, channel_id, image_path, caption):
-    return telegram_request(
-        "sendPhoto",
-        bot_token,
-        {
-            "chat_id": channel_id,
-            "caption": caption,
-        },
-        {"photo": image_path},
-    )
+    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+    with open(image_path, "rb") as photo:
+        try:
+            response = requests.post(
+                url,
+                data={
+                    "chat_id": channel_id,
+                    "caption": caption,
+                },
+                files={"photo": photo},
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Telegram sendPhoto failed: {exc}") from exc
+
+    return check_telegram_response(response, "sendPhoto")
 
 
 def send_message(bot_token, channel_id, text):
-    return telegram_request(
-        "sendMessage",
-        bot_token,
-        {
-            "chat_id": channel_id,
-            "text": text,
-            "disable_web_page_preview": "true",
-        },
-    )
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        response = requests.post(
+            url,
+            data={
+                "chat_id": channel_id,
+                "text": text,
+            },
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Telegram sendMessage failed: {exc}") from exc
+
+    return check_telegram_response(response, "sendMessage")
 
 
 def parse_args():
