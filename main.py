@@ -284,17 +284,30 @@ def full_html(
     <html>
     <head>
         <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>Ведический календарь Панчанга на сегодня</title>
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
         <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 
         <style>
+            html {{
+                box-sizing: border-box;
+                -webkit-text-size-adjust: 100%;
+                overflow-x: hidden;
+            }}
+
+            *,
+            *::before,
+            *::after {{
+                box-sizing: inherit;
+            }}
 
             body {{
                 --button-radius: 25px;
                 --form-gap: 16px;
                 --mono-font: "IBM Plex Mono", "Space Mono", monospace;
+                width: 100%;
                 font-family: var(--mono-font);
                 background: #f5f1e8;
                 color: #222;
@@ -303,9 +316,12 @@ def full_html(
                 letter-spacing: 0;
                 max-width: 1000px;
                 margin: auto;
+                overflow-x: hidden;
             }}
 
             .card {{
+                width: 100%;
+                min-width: 0;
                 background: white;
                 padding: 40px;
                 border-radius: 8px;
@@ -340,12 +356,14 @@ def full_html(
                 row-gap: var(--form-gap);
                 align-items: start;
                 margin-bottom: 8px;
+                min-width: 0;
             }}
 
             .field {{
                 display: flex;
                 flex-direction: column;
                 gap: 6px;
+                min-width: 0;
             }}
 
             .field-city {{
@@ -359,8 +377,8 @@ def full_html(
             }}
 
             input {{
-                box-sizing: border-box;
                 width: 100%;
+                min-width: 0;
                 min-height: 42px;
                 border: 1px solid #d8cbb7;
                 border-radius: 6px;
@@ -393,6 +411,7 @@ def full_html(
 
             .suggestion {{
                 width: 100%;
+                min-width: 0;
                 min-height: 38px;
                 border: 0;
                 border-radius: 0;
@@ -495,15 +514,27 @@ def full_html(
                 display: flex;
                 align-items: center;
                 justify-content: center;
+                width: 100%;
+                min-width: 0;
                 min-height: 470px;
+                overflow: hidden;
                 text-align: center;
                 margin-bottom: 4px;
                 scroll-margin-top: 24px;
             }}
 
+            .chart-svg {{
+                display: flex;
+                justify-content: center;
+                width: min(100%, 420px);
+                min-width: 0;
+            }}
+
             .chart svg {{
-                width: 420px;
-                height: 420px;
+                display: block;
+                width: 100%;
+                max-width: 420px;
+                height: auto;
             }}
 
             .chart-svg.is-hidden {{
@@ -519,7 +550,6 @@ def full_html(
             }}
 
             .day-nav a {{
-                box-sizing: border-box;
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
@@ -564,6 +594,7 @@ def full_html(
 
             pre {{
                 white-space: pre-wrap;
+                overflow-wrap: anywhere;
                 font-family: var(--mono-font);
                 font-size: 17px;
                 line-height: 1.68;
@@ -572,6 +603,8 @@ def full_html(
 
             .panchanga-output {{
                 white-space: normal;
+                min-width: 0;
+                overflow-wrap: anywhere;
                 margin-top: 0;
             }}
 
@@ -615,7 +648,6 @@ def full_html(
             }}
 
             .footer-link {{
-                box-sizing: border-box;
                 display: inline-flex;
                 align-items: center;
                 gap: 8px;
@@ -706,28 +738,57 @@ def full_html(
                 }}
 
                 .controls {{
-                    grid-template-columns: repeat(6, minmax(0, 1fr));
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
                 }}
 
                 .field-date,
                 .field-time {{
-                    grid-column: span 3;
+                    grid-column: span 1;
                 }}
 
                 .field-city {{
-                    grid-column: span 6;
+                    grid-column: 1 / -1;
                 }}
 
                 .submit-button {{
                     grid-column: 1 / -1;
-                    grid-row: 4;
                     justify-self: center;
                     width: min(100%, 240px);
                     margin: 0;
                 }}
 
                 .chart {{
-                    min-height: 430px;
+                    min-height: 0;
+                    padding: 14px 0 12px;
+                }}
+            }}
+
+            @media (max-width: 420px) {{
+                body {{
+                    padding: 10px;
+                }}
+
+                .card {{
+                    padding: 14px;
+                }}
+
+                .controls {{
+                    grid-template-columns: 1fr;
+                }}
+
+                .field-date,
+                .field-time,
+                .field-city {{
+                    grid-column: 1 / -1;
+                }}
+
+                .intro h1 {{
+                    font-size: 22px;
+                }}
+
+                .day-nav a,
+                .footer-link {{
+                    width: 100%;
                 }}
             }}
 
