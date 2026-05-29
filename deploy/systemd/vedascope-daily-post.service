@@ -1,0 +1,10 @@
+[Unit]
+Description=VedaScope daily Panchanga Telegram post
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vedascope/astro-engine
+EnvironmentFile=/opt/vedascope/astro-engine/.env
+ExecStart=/opt/vedascope/astro-engine/venv/bin/python /opt/vedascope/astro-engine/daily_post.py

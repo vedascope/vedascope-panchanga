@@ -355,7 +355,15 @@ def full_html(
                 column-gap: var(--form-gap);
                 row-gap: var(--form-gap);
                 align-items: start;
+                width: 100%;
+                max-width: 100%;
                 margin-bottom: 8px;
+                min-width: 0;
+            }}
+
+            .form-row {{
+                width: 100%;
+                max-width: 100%;
                 min-width: 0;
             }}
 
@@ -363,6 +371,8 @@ def full_html(
                 display: flex;
                 flex-direction: column;
                 gap: 6px;
+                width: 100%;
+                max-width: 100%;
                 min-width: 0;
             }}
 
@@ -371,13 +381,17 @@ def full_html(
             }}
 
             label {{
+                max-width: 100%;
                 font-size: 13px;
                 font-weight: 500;
                 color: #5f5548;
+                overflow-wrap: anywhere;
             }}
 
-            input {{
+            input,
+            select {{
                 width: 100%;
+                max-width: 100%;
                 min-width: 0;
                 min-height: 42px;
                 border: 1px solid #d8cbb7;
@@ -387,6 +401,14 @@ def full_html(
                 font-weight: 400;
                 background: #fffdf8;
                 color: #222;
+            }}
+
+            .controls input,
+            .controls select,
+            .controls button {{
+                width: 100%;
+                max-width: 100%;
+                min-width: 0;
             }}
 
             .suggestions {{
@@ -439,6 +461,8 @@ def full_html(
             button {{
                 position: relative;
                 overflow: hidden;
+                max-width: 100%;
+                min-width: 0;
                 min-height: 42px;
                 border: 0;
                 border-radius: var(--button-radius);
@@ -503,7 +527,6 @@ def full_html(
                 align-self: start;
                 justify-self: stretch;
                 height: 42px;
-                min-width: 140px;
                 margin: 27px 0 0;
                 padding-top: 0;
                 padding-bottom: 0;
@@ -546,6 +569,8 @@ def full_html(
                 flex-wrap: wrap;
                 justify-content: center;
                 gap: 12px;
+                width: 100%;
+                max-width: 100%;
                 margin: 0 0 18px;
             }}
 
@@ -553,6 +578,8 @@ def full_html(
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
+                max-width: 100%;
+                min-width: 0;
                 min-height: 42px;
                 border: 1px solid #d8cbb7;
                 border-radius: var(--button-radius);
@@ -561,6 +588,7 @@ def full_html(
                 color: #5B3A1A;
                 font-weight: 600;
                 text-decoration: none;
+                overflow-wrap: anywhere;
                 transition:
                     background-color 120ms ease,
                     border-color 120ms ease,
@@ -761,6 +789,20 @@ def full_html(
                     min-height: 0;
                     padding: 14px 0 12px;
                 }}
+
+                .day-nav {{
+                    flex-wrap: nowrap;
+                    gap: 8px;
+                }}
+
+                .day-nav a {{
+                    flex: 1 1 0;
+                    padding: 8px 10px;
+                    font-size: 14px;
+                    line-height: 1.2;
+                    text-align: center;
+                    white-space: nowrap;
+                }}
             }}
 
             @media (max-width: 420px) {{
@@ -786,9 +828,17 @@ def full_html(
                     font-size: 22px;
                 }}
 
-                .day-nav a,
                 .footer-link {{
                     width: 100%;
+                }}
+
+                .day-nav {{
+                    gap: 6px;
+                }}
+
+                .day-nav a {{
+                    padding: 8px 6px;
+                    font-size: 12px;
                 }}
             }}
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run VedaScope daily Panchanga post at 06:00 MSK
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 Europe/Moscow
+Persistent=true
+Unit=vedascope-daily-post.service
+
+[Install]
+WantedBy=timers.target

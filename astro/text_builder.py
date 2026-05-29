@@ -39,6 +39,24 @@ def format_list(items):
     return html
 
 
+def format_lunar_day_periods(title, periods):
+    if not periods:
+        return ""
+
+    html = f'<div class="lunar-periods"><h3>{title}</h3>'
+
+    for period in periods:
+        period_name = period.get("display") or period.get("name")
+        html += (
+            f'<div class="period-line">• {period_name} — '
+            f'с {period["starts_at"]} до {period["ends_at"]}</div>'
+        )
+
+    html += "</div>"
+
+    return html
+
+
 def format_day_periods(periods):
     if not periods:
         return ""
@@ -144,6 +162,8 @@ def build_panchanga_text(panchanga):
 .period-item {{ margin: 4px 0; padding: 0; }}
 .period-item strong {{ display: block; font-weight: 600; }}
 .period-item span {{ display: block; opacity: 0.86; }}
+.lunar-periods {{ margin: 10px 0 14px; line-height: 1.42; }}
+.lunar-periods h3 {{ margin-top: 0; }}
 .subtitle {{ opacity: 0.72; margin-bottom: 10px; font-size: 13px; line-height: 1.34; }}
 </style>
 <h1>Панчанга на {day} {month} {year}</h1>
@@ -152,6 +172,7 @@ def build_panchanga_text(panchanga):
 <h2>{vara_data["ru"]} — день {vara_data["planet_genitive"]} {vara_data["emoji"]}</h2>
 <p>{vara_data["description"]}</p>
 <h2>{tithi_data["display"]} ({tithi_data["ru"]})</h2>
+{format_lunar_day_periods("Титхи", tithi.get("day_periods"))}
 <p><strong>{tithi_data["summary"]}</strong></p>
 <p>{tithi_data["description"]}</p>
 <h3>Благоприятно</h3>
@@ -162,6 +183,7 @@ def build_panchanga_text(panchanga):
 <p><strong>{moon_data["summary"]}</strong></p>
 <p>{moon_data["description"]}</p>
 <h2>Луна в накшатре {nak_data["ru"]} ({nakshatra_types}) ⭐</h2>
+{format_lunar_day_periods("Накшатра", nakshatra.get("day_periods"))}
 <p><strong>{nak_data["summary"]}</strong></p>
 <p>{nak_data["description"]}</p>
 <h3>Благоприятно</h3>

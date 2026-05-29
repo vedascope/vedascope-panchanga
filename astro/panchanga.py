@@ -1,5 +1,5 @@
 import swisseph as swe
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from astro.data_loader import (
     VARAS,
@@ -11,6 +11,13 @@ from astro.data_loader import (
 from astro.special_conditions import calculate_gandanta
 from astro.yogas import calculate_moon_yogas
 from astro.muhurta import calculate_day_periods
+from astro.muhurta import (
+    find_next_index_change,
+    get_nakshatra_index,
+    get_tithi_index,
+    julday_to_datetime,
+    local_datetime_to_utc_julday,
+)
 
 
 TITHIS = [
@@ -33,8 +40,158 @@ NAKSHATRAS = [
 ]
 
 
+VEDIC_YOGAS = [
+    ("Vishkambha", "Вишкамбха"),
+    ("Priti", "Прити"),
+    ("Ayushman", "Аюшман"),
+    ("Saubhagya", "Саубхагья"),
+    ("Shobhana", "Шобхана"),
+    ("Atiganda", "Атиганда"),
+    ("Sukarman", "Сукарма"),
+    ("Dhriti", "Дхрити"),
+    ("Shula", "Шула"),
+    ("Ganda", "Ганда"),
+    ("Vriddhi", "Вриддхи"),
+    ("Dhruva", "Дхрува"),
+    ("Vyaghata", "Вьягхата"),
+    ("Harshana", "Харшана"),
+    ("Vajra", "Ваджра"),
+    ("Siddhi", "Сиддхи"),
+    ("Vyatipata", "Вьятипата"),
+    ("Variyana", "Варияна"),
+    ("Parigha", "Паригха"),
+    ("Shiva", "Шива"),
+    ("Siddha", "Сиддха"),
+    ("Sadhya", "Садхья"),
+    ("Shubha", "Шубха"),
+    ("Shukla", "Шукла"),
+    ("Brahma", "Брахма"),
+    ("Indra", "Индра"),
+    ("Vaidhriti", "Вайдхрити"),
+]
+
+
+KARANAS = {
+    "Bava": "Бава",
+    "Balava": "Балава",
+    "Kaulava": "Каулава",
+    "Taitila": "Тайтила",
+    "Gara": "Гара",
+    "Vanija": "Ваниджа",
+    "Vishti": "Вишти",
+    "Shakuni": "Шакуни",
+    "Chatushpada": "Чатушпада",
+    "Naga": "Нага",
+    "Kimstughna": "Кимстугхна",
+}
+
+
 def normalize(deg):
     return deg % 360
+
+
+def calculate_vedic_yoga(sun, moon):
+    yoga_index = int(normalize(sun + moon) // (360 / 27))
+    key, ru = VEDIC_YOGAS[yoga_index]
+    return {
+        "number": yoga_index + 1,
+        "key": key,
+        "ru": ru,
+    }
+
+
+def calculate_karana(diff):
+    half_tithi_index = int(diff // 6)
+    movable = ["Bava", "Balava", "Kaulava", "Taitila", "Gara", "Vanija", "Vishti"]
+
+    if half_tithi_index == 0:
+        key = "Kimstughna"
+    elif 1 <= half_tithi_index <= 56:
+        key = movable[(half_tithi_index - 1) % len(movable)]
+    elif half_tithi_index == 57:
+        key = "Shakuni"
+    elif half_tithi_index == 58:
+        key = "Chatushpada"
+    else:
+        key = "Naga"
+
+    return {
+        "number": half_tithi_index + 1,
+        "key": key,
+        "ru": KARANAS[key],
+    }
+
+
+def format_local_time(dt):
+    return dt.strftime("%H:%M")
+
+
+def jd_to_local_datetime(jd, timezone):
+    return julday_to_datetime(jd) + timedelta(hours=timezone)
+
+
+def get_tithi_period_data(index):
+    number = index + 1
+    data = TITHIS_DATA.get(str(number), {})
+    return {
+        "number": number,
+        "sanskrit": TITHIS[index],
+        "name": data.get("ru", TITHIS[index]),
+        "display": data.get("display", TITHIS[index]),
+    }
+
+
+def get_nakshatra_period_data(index):
+    key = NAKSHATRAS[index]
+    data = NAKSHATRAS_DATA.get(key, {})
+    return {
+        "number": index + 1,
+        "key": key,
+        "name": data.get("ru", key),
+    }
+
+
+def build_lunar_day_periods(year, month, day, hour, minute, timezone, kind):
+    start_time = f"{hour:02d}:{minute:02d}"
+    start_jd = local_datetime_to_utc_julday(year, month, day, hour, minute, timezone)
+    local_day_end = datetime(year, month, day, 23, 59)
+
+    if kind == "tithi":
+        index_getter = get_tithi_index
+        period_data_getter = get_tithi_period_data
+    else:
+        index_getter = get_nakshatra_index
+        period_data_getter = get_nakshatra_period_data
+
+    current_index = index_getter(start_jd)
+    current_period = {
+        **period_data_getter(current_index),
+        "starts_at": start_time,
+        "ends_at": "конца суток",
+        "ends_at_time": None,
+    }
+
+    change_jd = find_next_index_change(start_jd, index_getter)
+    if change_jd is None:
+        return [current_period]
+
+    change_local = jd_to_local_datetime(change_jd, timezone)
+    if change_local.date() != local_day_end.date() or change_local > local_day_end:
+        return [current_period]
+
+    change_time = format_local_time(change_local)
+    current_period["ends_at"] = change_time
+    current_period["ends_at_time"] = change_time
+
+    next_index = index_getter(change_jd + 1 / 86400)
+    next_period = {
+        **period_data_getter(next_index),
+        "starts_at": change_time,
+        "ends_at": "конца суток",
+        "ends_at_time": None,
+    }
+
+    return [current_period, next_period]
 
 
 def calculate_panchanga(
@@ -96,6 +253,8 @@ def calculate_panchanga(
 
     tithi_index = int(diff // 12)
     nakshatra_index = int(moon // (360 / 27))
+    vedic_yoga = calculate_vedic_yoga(sun, moon)
+    karana = calculate_karana(diff)
 
     dt = datetime(year, month, day)
 
@@ -167,6 +326,24 @@ def calculate_panchanga(
     }
 
     yogas = calculate_moon_yogas(chart_data)
+    tithi_periods = build_lunar_day_periods(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        timezone,
+        "tithi",
+    )
+    nakshatra_periods = build_lunar_day_periods(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        timezone,
+        "nakshatra",
+    )
 
     return {
 
@@ -189,6 +366,7 @@ def calculate_panchanga(
             "number": tithi_number,
             "sanskrit": TITHIS[tithi_index],
             "data": TITHIS_DATA.get(tithi_key),
+            "day_periods": tithi_periods,
         },
 
         "moon": {
@@ -208,6 +386,16 @@ def calculate_panchanga(
                 nakshatra_key
             ),
             "gandanta": gandanta,
+            "day_periods": nakshatra_periods,
+        },
+
+        "vedic_yoga": vedic_yoga,
+
+        "karana": karana,
+
+        "lunar_day_periods": {
+            "tithi": tithi_periods,
+            "nakshatra": nakshatra_periods,
         },
 
         "muhurta": day_periods,
