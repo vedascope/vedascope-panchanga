@@ -209,6 +209,7 @@ def full_html(
     chart_style: str = "south",
 ):
     today = date.today()
+    is_default_example = year is None and month is None and day is None
     year = year or today.year
     month = month or today.month
     day = day or today.day
@@ -347,6 +348,28 @@ def full_html(
                 line-height: 1.62;
                 font-weight: 400;
                 color: #4c4338;
+            }}
+
+            .form-context {{
+                margin: 0 0 18px;
+                padding: 12px 14px;
+                border-left: 3px solid #C69214;
+                border-radius: 6px;
+                background: #fff8ea;
+                color: #5f5548;
+                font-size: 14px;
+                line-height: 1.45;
+                overflow-wrap: anywhere;
+            }}
+
+            .default-example-note {{
+                margin: 0 0 18px;
+                padding: 10px 12px;
+                border-radius: 6px;
+                background: #f5ead8;
+                color: #5B3A1A;
+                font-size: 14px;
+                line-height: 1.42;
             }}
 
             .controls {{
@@ -534,6 +557,7 @@ def full_html(
             }}
 
             .chart {{
+                position: relative;
                 display: flex;
                 align-items: center;
                 justify-content: center;
@@ -546,11 +570,62 @@ def full_html(
                 scroll-margin-top: 24px;
             }}
 
+            .loading-indicator {{
+                position: absolute;
+                inset: 0;
+                z-index: 2;
+                display: none;
+                align-items: center;
+                justify-content: center;
+                background: rgba(255, 253, 247, 0.78);
+                color: #5B3A1A;
+                font-size: 16px;
+                font-weight: 600;
+            }}
+
+            .loading-indicator::before {{
+                content: "";
+                width: 20px;
+                height: 20px;
+                margin-right: 10px;
+                border: 3px solid #eadcc6;
+                border-top-color: #7b4f20;
+                border-radius: 50%;
+                animation: spin 800ms linear infinite;
+            }}
+
+            @keyframes spin {{
+                to {{
+                    transform: rotate(360deg);
+                }}
+            }}
+
+            body.is-loading .chart-svg {{
+                opacity: 0.4;
+                filter: grayscale(0.25);
+            }}
+
+            body.is-loading .loading-indicator {{
+                display: flex;
+            }}
+
             .chart-svg {{
                 display: flex;
                 justify-content: center;
                 width: min(100%, 420px);
                 min-width: 0;
+                animation: chart-fade-in 220ms ease-out;
+            }}
+
+            @keyframes chart-fade-in {{
+                from {{
+                    opacity: 0;
+                    transform: translateY(4px);
+                }}
+                to {{
+                    opacity: 1;
+                    transform: translateY(0);
+                }}
             }}
 
             .chart svg {{
@@ -765,6 +840,11 @@ def full_html(
                     font-size: 15px;
                 }}
 
+                .form-context,
+                .default-example-note {{
+                    font-size: 13px;
+                }}
+
                 .controls {{
                     grid-template-columns: repeat(2, minmax(0, 1fr));
                 }}
@@ -881,6 +961,20 @@ def full_html(
                 return Number(value).toFixed(2);
             }}
 
+            const LOCAL_CITY_FALLBACKS = [
+                {{
+                    name: "Гатчина",
+                    lat: "59.5684",
+                    lon: "30.1229",
+                    address: {{
+                        city: "Гатчина",
+                        state: "Ленинградская область",
+                        country_code: "ru"
+                    }},
+                    timezone: 3
+                }}
+            ];
+
             async function resolveTimezone(latitude, longitude) {{
                 const url = new URL("https://timeapi.io/api/TimeZone/coordinate");
                 url.searchParams.set("latitude", latitude);
@@ -994,15 +1088,40 @@ def full_html(
                 }});
             }}
 
-            async function searchCities(query) {{
-                const russianPlaces = await fetchCities(query, "ru");
-                if (russianPlaces.length >= 8) {{
-                    return sortExactCityFirst(dedupePlaces(russianPlaces), query).slice(0, 8);
+            function getLocalCityFallbacks(query) {{
+                const normalizedQuery = normalizeAddressPart(query);
+                if (normalizedQuery.length < 2) {{
+                    return [];
                 }}
 
-                const globalPlaces = await fetchCities(query);
+                return LOCAL_CITY_FALLBACKS.filter((place) => {{
+                    const title = normalizeAddressPart(place.name);
+                    return title.startsWith(normalizedQuery) || title.includes(normalizedQuery);
+                }});
+            }}
+
+            async function searchCities(query) {{
+                const localPlaces = getLocalCityFallbacks(query);
+                let russianPlaces = [];
+                let globalPlaces = [];
+
+                try {{
+                    russianPlaces = await fetchCities(query, "ru");
+                    if (russianPlaces.length >= 8) {{
+                        return sortExactCityFirst(dedupePlaces([...localPlaces, ...russianPlaces]), query).slice(0, 8);
+                    }}
+
+                    globalPlaces = await fetchCities(query);
+                }} catch (error) {{
+                    if (localPlaces.length) {{
+                        return sortExactCityFirst(localPlaces, query).slice(0, 8);
+                    }}
+
+                    throw error;
+                }}
+
                 return sortExactCityFirst(sortRussianFirst(
-                    dedupePlaces([...russianPlaces, ...globalPlaces])
+                    dedupePlaces([...localPlaces, ...russianPlaces, ...globalPlaces])
                 ), query).slice(0, 8);
             }}
 
@@ -1041,7 +1160,7 @@ def full_html(
                 async function selectCity(place) {{
                     const latitude = Number(place.lat);
                     const longitude = Number(place.lon);
-                    const fallbackTimezone = estimateTimezoneFromLongitude(longitude);
+                    const fallbackTimezone = place.timezone || estimateTimezoneFromLongitude(longitude);
 
                     cityInput.value = getCityTitle(place);
                     latInput.value = formatCoordinate(latitude);
@@ -1103,6 +1222,23 @@ def full_html(
                     if (!cityInput.parentElement.contains(event.target)) {{
                         closeSuggestions();
                     }}
+                }});
+            }}
+
+            function setupLoadingState() {{
+                const form = document.querySelector(".controls");
+                const dayLinks = document.querySelectorAll(".day-nav a");
+
+                function showLoading() {{
+                    document.body.classList.add("is-loading");
+                }}
+
+                if (form) {{
+                    form.addEventListener("submit", showLoading);
+                }}
+
+                dayLinks.forEach((link) => {{
+                    link.addEventListener("click", showLoading);
                 }});
             }}
 
@@ -1207,6 +1343,7 @@ def full_html(
 
             window.addEventListener("DOMContentLoaded", () => {{
                 setupCityAutocomplete();
+                setupLoadingState();
                 setupInfoblockToggle();
                 setupChartStyleToggle();
             }});
@@ -1218,13 +1355,17 @@ def full_html(
         <div class="card">
 
             <section class="intro">
-                <h1>Ведический календарь Панчанга на сегодня</h1>
-                <p>Профессиональный астролог всегда начинает день со взгляда на небо и понимания качества времени. Здесь вы можете построить Джйотиш-карту на каждый день, согласно Ведическому лунному календарю Панчанга с автоматическим анализом характеристик дня. Вы сможете оценить день недели, лунные сутки, накшатру (созвездие) в котором сейчас находится Луна и получить полезные рекомендации.</p>
+                <h1>Панчанга дня</h1>
+                <p>Выберите дату, время и место, для которых нужно рассчитать состояние дня по ведическому лунному календарю. Панчанга показывает качество времени: день недели, лунные сутки, накшатру и рекомендации.</p>
             </section>
+
+            <p class="form-context">Это не дата рождения. Это дата и время события или текущего момента, для которого строится Панчанга. Для натальной карты используйте дату, время и город рождения. Для Панчанги дня — текущую дату, время и город.</p>
+
+            {"<p class=\"default-example-note\">Сейчас показан пример: Москва, текущая дата, 09:00.</p>" if is_default_example else ""}
 
             <form class="controls" method="get" action="/full/html" onsubmit="syncDateTimeFields(this)">
                 <div class="field field-date">
-                    <label for="date">Дата</label>
+                    <label for="date">Дата расчёта</label>
                     <input id="date" type="date" value="{input_date}">
                     <input name="year" type="hidden" value="{year}">
                     <input name="month" type="hidden" value="{month}">
@@ -1232,14 +1373,14 @@ def full_html(
                 </div>
 
                 <div class="field field-time">
-                    <label for="time">Время</label>
+                    <label for="time">Время расчёта</label>
                     <input id="time" type="time" value="{input_time}">
                     <input name="hour" type="hidden" value="{hour}">
                     <input name="minute" type="hidden" value="{minute}">
                 </div>
 
                 <div class="field field-city">
-                    <label for="city">Город</label>
+                    <label for="city">Место расчёта</label>
                     <input id="city" name="city" type="text" value="{safe_city}">
                     <div id="city-suggestions" class="suggestions"></div>
                     <div id="city-note" class="field-note" aria-live="polite"></div>
@@ -1251,10 +1392,11 @@ def full_html(
 
                 <input name="chart_style" type="hidden" value="{current_chart_style}">
 
-                <button class="submit-button" type="submit">Рассчитать</button>
+                <button class="submit-button" type="submit">Рассчитать Панчангу</button>
             </form>
 
             <div id="chart" class="chart">
+                <div class="loading-indicator" aria-live="polite">Пересчитываем Панчангу...</div>
                 <div class="{south_chart_class}" data-chart-style="south">
                     {south_svg_chart}
                 </div>

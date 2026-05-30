@@ -1,4 +1,6 @@
 import argparse
+import html
+import json
 import logging
 import os
 import tempfile
@@ -21,6 +23,7 @@ DEFAULT_CALC_HOUR = 6
 DEFAULT_CALC_MINUTE = 0
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 TELEGRAM_MESSAGE_LIMIT = 4096
+FULL_PANCHANGA_URL = "https://panchanga.vedascope.ru/full/html"
 
 LOGGER = logging.getLogger("daily_post")
 
@@ -101,14 +104,26 @@ def generate_chart_images(target_date, hour, minute, output_dir):
     return images
 
 
-def format_periods(periods):
+def escape_html(value):
+    return html.escape(str(value), quote=True)
+
+
+def format_lunar_periods(periods):
     if not periods:
-        return "нет данных"
+        return escape_html("нет данных")
 
     lines = []
     for period in periods:
         name = period.get("display") or period.get("name")
-        lines.append(f"• {name}: с {period['starts_at']} до {period['ends_at']}")
+        safe_name = escape_html(name)
+        start = escape_html(period["starts_at"])
+        end = escape_html(period["ends_at"])
+        if len(periods) == 1:
+            lines.append(f"{safe_name} до {end}")
+        elif period.get("ends_at_time"):
+            lines.append(f"{safe_name} до {end}")
+        else:
+            lines.append(f"{safe_name} с {start}")
     return "\n".join(lines)
 
 
@@ -127,7 +142,6 @@ def build_daily_text(panchanga):
     date_text = datetime.strptime(panchanga["date"], "%Y-%m-%d").strftime("%d.%m.%Y")
     tithi = panchanga["tithi"]
     nakshatra = panchanga["nakshatra"]
-    vara = panchanga["vara"]["data"]
     vedic_yoga = panchanga.get("vedic_yoga", {})
     karana = panchanga.get("karana", {})
     muhurta = panchanga.get("muhurta") or {}
@@ -141,31 +155,39 @@ def build_daily_text(panchanga):
     recommendation = " ".join(recommendation_parts)
 
     lines = [
-        f"Панчанга на {date_text}, {DEFAULT_CITY}",
+        f"🌞 <b>Панчанга на {escape_html(date_text)}</b>",
         "",
-        f"Вара: {vara['ru']}",
+        "🌙 <b>Титхи:</b>",
+        format_lunar_periods(tithi.get("day_periods")),
         "",
-        "Титхи:",
-        format_periods(tithi.get("day_periods")),
+        "⭐ <b>Накшатра:</b>",
+        format_lunar_periods(nakshatra.get("day_periods")),
         "",
-        "Накшатра:",
-        format_periods(nakshatra.get("day_periods")),
+        f"🧘 <b>Йога:</b> {escape_html(vedic_yoga.get('ru', 'нет данных'))}",
         "",
-        f"Йога: {vedic_yoga.get('ru', 'нет данных')}",
-        f"Карана: {karana.get('ru', 'нет данных')}",
+        f"🔱 <b>Карана:</b> {escape_html(karana.get('ru', 'нет данных'))}",
         "",
-        f"Раху Кала: {get_period(muhurta, 'rahu_kalam')}",
-        f"Ямаганда: {get_period(muhurta, 'yamaganda')}",
-        f"Гулика: {get_period(muhurta, 'gulika')}",
-        f"Абхиджит-мухурта: {get_period(muhurta, 'abhijit_muhurta')}",
+        "❗ <b>Важные периоды дня</b>",
+        "",
+        "<blockquote>",
+        f"Раху-кала: {escape_html(get_period(muhurta, 'rahu_kalam'))}",
+        f"Ямаганда: {escape_html(get_period(muhurta, 'yamaganda'))}",
+        f"Гулика: {escape_html(get_period(muhurta, 'gulika'))}",
+        f"Абхиджит-мухурта: {escape_html(get_period(muhurta, 'abhijit_muhurta'))}",
+        "</blockquote>",
     ]
 
     if moon_yogas:
         lines += ["", "Дополнительные влияния:"]
-        lines += [f"• {yoga['title']}" for yoga in moon_yogas[:3]]
+        lines += [f"• {escape_html(yoga['title'])}" for yoga in moon_yogas[:3]]
 
     if recommendation:
-        lines += ["", "Краткая рекомендация:", recommendation]
+        lines += ["", "✨ <b>Рекомендации дня</b>", escape_html(recommendation)]
+
+    lines += [
+        "",
+        f'🔗 <a href="{escape_html(FULL_PANCHANGA_URL)}">Полная панчанга</a>',
+    ]
 
     text = "\n".join(lines).strip()
     if len(text) > TELEGRAM_MESSAGE_LIMIT:
@@ -198,23 +220,39 @@ def check_telegram_response(response, method):
     return payload
 
 
-def send_photo(bot_token, channel_id, image_path, caption):
-    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-    with open(image_path, "rb") as photo:
+def send_media_group(bot_token, channel_id, images):
+    url = f"https://api.telegram.org/bot{bot_token}/sendMediaGroup"
+    media = [
+        {
+            "type": "photo",
+            "media": "attach://south",
+            "caption": "Карта дня, южный стиль",
+        },
+        {
+            "type": "photo",
+            "media": "attach://north",
+            "caption": "Карта дня, северный стиль",
+        },
+    ]
+
+    with open(images["south"], "rb") as south, open(images["north"], "rb") as north:
         try:
             response = requests.post(
                 url,
                 data={
                     "chat_id": channel_id,
-                    "caption": caption,
+                    "media": json.dumps(media, ensure_ascii=False),
                 },
-                files={"photo": photo},
+                files={
+                    "south": south,
+                    "north": north,
+                },
                 timeout=30,
             )
         except requests.RequestException as exc:
-            raise RuntimeError(f"Telegram sendPhoto failed: {exc}") from exc
+            raise RuntimeError(f"Telegram sendMediaGroup failed: {exc}") from exc
 
-    return check_telegram_response(response, "sendPhoto")
+    return check_telegram_response(response, "sendMediaGroup")
 
 
 def send_message(bot_token, channel_id, text):
@@ -225,6 +263,7 @@ def send_message(bot_token, channel_id, text):
             data={
                 "chat_id": channel_id,
                 "text": text,
+                "parse_mode": "HTML",
             },
             timeout=30,
         )
@@ -295,10 +334,8 @@ def main():
             raise RuntimeError("BOT_TOKEN and CHANNEL_ID must be set in environment or .env")
 
         try:
-            send_photo(bot_token, channel_id, images["south"], "Карта дня, южный стиль")
-            LOGGER.info("South chart sent to %s", channel_id)
-            send_photo(bot_token, channel_id, images["north"], "Карта дня, северный стиль")
-            LOGGER.info("North chart sent to %s", channel_id)
+            send_media_group(bot_token, channel_id, images)
+            LOGGER.info("Chart album sent to %s", channel_id)
             send_message(bot_token, channel_id, text)
             LOGGER.info("Daily Panchanga text sent to %s", channel_id)
         except Exception:
