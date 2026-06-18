@@ -1,0 +1,90 @@
+[
+  {
+    "id": "seed:moscow-ru",
+    "name": "Москва",
+    "country": "Россия",
+    "region": "Москва",
+    "latitude": 55.7558,
+    "longitude": 37.6173,
+    "timezone": "Europe/Moscow",
+    "aliases": ["Moscow", "москва"],
+    "source": "seed"
+  },
+  {
+    "id": "seed:saint-petersburg-ru",
+    "name": "Санкт-Петербург",
+    "country": "Россия",
+    "region": "Санкт-Петербург",
+    "latitude": 59.9311,
+    "longitude": 30.3609,
+    "timezone": "Europe/Moscow",
+    "aliases": ["Saint Petersburg", "St Petersburg", "SPB", "санкт петербург", "санкт-петербург", "петербург"],
+    "source": "seed"
+  },
+  {
+    "id": "seed:amsterdam-nl",
+    "name": "Амстердам",
+    "country": "Нидерланды",
+    "region": "Северная Голландия",
+    "latitude": 52.3676,
+    "longitude": 4.9041,
+    "timezone": "Europe/Amsterdam",
+    "aliases": ["Amsterdam", "амстердам"],
+    "source": "seed"
+  },
+  {
+    "id": "seed:new-york-us",
+    "name": "Нью-Йорк",
+    "country": "США",
+    "region": "New York",
+    "latitude": 40.7128,
+    "longitude": -74.006,
+    "timezone": "America/New_York",
+    "aliases": ["New York", "NYC", "нью йорк", "нью-йорк"],
+    "source": "seed"
+  },
+  {
+    "id": "seed:vladivostok-ru",
+    "name": "Владивосток",
+    "country": "Россия",
+    "region": "Приморский край",
+    "latitude": 43.1155,
+    "longitude": 131.8855,
+    "timezone": "Asia/Vladivostok",
+    "aliases": ["Vladivostok", "владивосток"],
+    "source": "seed"
+  },
+  {
+    "id": "seed:roshchino-vyborg-ru",
+    "name": "Рощино",
+    "country": "Россия",
+    "region": "Выборгский район",
+    "latitude": 60.2519,
+    "longitude": 29.6085,
+    "timezone": "Europe/Moscow",
+    "aliases": ["Roshchino", "рощино"],
+    "source": "seed"
+  },
+  {
+    "id": "seed:delhi-in",
+    "name": "Дели",
+    "country": "Индия",
+    "region": "Delhi",
+    "latitude": 28.6139,
+    "longitude": 77.209,
+    "timezone": "Asia/Kolkata",
+    "aliases": ["Delhi", "New Delhi", "дели", "нью дели"],
+    "source": "seed"
+  },
+  {
+    "id": "seed:london-gb",
+    "name": "Лондон",
+    "country": "Великобритания",
+    "region": "England",
+    "latitude": 51.5074,
+    "longitude": -0.1278,
+    "timezone": "Europe/London",
+    "aliases": ["London", "лондон"],
+    "source": "seed"
+  }
+]

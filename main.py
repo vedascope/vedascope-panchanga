@@ -1,16 +1,15 @@
 from html import escape
-from datetime import date, timedelta
-from typing import Annotated
-from urllib.parse import urlencode
+import json
+from datetime import date, datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Response
 
 from astro.panchanga import calculate_panchanga
 from astro.chart import calculate_chart
 
-from astro.south_chart import generate_north_indian_svg, generate_south_indian_svg
+from astro.south_chart import generate_south_indian_svg
 
 from astro.text_builder import build_panchanga_text
 from astro.html_builder import build_panchanga_html
@@ -18,90 +17,110 @@ from astro.html_builder import build_panchanga_html
 
 app = FastAPI()
 
-YearParam = Annotated[int, Query(ge=1900, le=2100)]
-OptionalYearParam = Annotated[int | None, Query(ge=1900, le=2100)]
-MonthParam = Annotated[int, Query(ge=1, le=12)]
-OptionalMonthParam = Annotated[int | None, Query(ge=1, le=12)]
-DayParam = Annotated[int, Query(ge=1, le=31)]
-OptionalDayParam = Annotated[int | None, Query(ge=1, le=31)]
-HourParam = Annotated[int, Query(ge=0, le=23)]
-MinuteParam = Annotated[int, Query(ge=0, le=59)]
-TimezoneParam = Annotated[float, Query(ge=-12, le=14)]
-LatitudeParam = Annotated[float, Query(ge=-90, le=90)]
-LongitudeParam = Annotated[float, Query(ge=-180, le=180)]
+LOCATION_SEED_PATH = Path(__file__).resolve().parent / "data" / "locations.seed.json"
+NAKSHATRA_SPAN = 360 / 27
+PADA_SPAN = 360 / 108
+GRAHA_OUTPUT = [
+    ("Su", "sun", "Sun"),
+    ("Mo", "moon", "Moon"),
+    ("Ma", "mars", "Mars"),
+    ("Me", "mercury", "Mercury"),
+    ("Ju", "jupiter", "Jupiter"),
+    ("Ve", "venus", "Venus"),
+    ("Sa", "saturn", "Saturn"),
+    ("Ra", "rahu", "Rahu"),
+    ("Ke", "ketu", "Ketu"),
+]
 
 
-def validate_calendar_date(year, month, day):
+def normalize_search_text(value):
+    return str(value or "").strip().lower().replace("ё", "е")
+
+
+def load_seed_locations():
+    with LOCATION_SEED_PATH.open(encoding="utf-8") as file:
+        data = json.load(file)
+
+    return data if isinstance(data, list) else []
+
+
+def location_search_text(location):
+    values = [
+        location.get("name"),
+        location.get("country"),
+        location.get("region"),
+        *(location.get("aliases") or []),
+    ]
+
+    return " ".join(normalize_search_text(value) for value in values if value)
+
+
+def score_location(location, query):
+    normalized_query = normalize_search_text(query)
+    name = normalize_search_text(location.get("name"))
+    aliases = [normalize_search_text(alias) for alias in location.get("aliases") or []]
+
+    if name == normalized_query or normalized_query in aliases:
+        return 0
+    if name.startswith(normalized_query) or any(alias.startswith(normalized_query) for alias in aliases):
+        return 1
+    if normalized_query in location_search_text(location):
+        return 2
+    return 9
+
+
+def parse_local_datetime(date_value, time_value):
     try:
-        return date(year, month, day)
+        return datetime.strptime(f"{date_value} {time_value}", "%Y-%m-%d %H:%M")
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail="Invalid calendar date",
+            detail="Invalid date or time. Use date=YYYY-MM-DD and time=HH:MM.",
         ) from exc
 
 
-def build_error_html(message):
-    safe_message = escape(message)
-    return f"""
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>{safe_message}</title>
-        <style>
-            body {{
-                --mono-font: "IBM Plex Mono", "Space Mono", monospace;
-                display: grid;
-                min-height: 100vh;
-                place-items: center;
-                margin: 0;
-                padding: 24px;
-                box-sizing: border-box;
-                font-family: var(--mono-font);
-                background: #f5f1e8;
-                color: #222;
-            }}
+def resolve_timezone_offset(local_dt, tz, timezone):
+    if tz:
+        try:
+            zoned_dt = local_dt.replace(tzinfo=ZoneInfo(tz))
+        except ZoneInfoNotFoundError as exc:
+            if timezone is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Unknown IANA timezone and no numeric timezone fallback provided.",
+                ) from exc
+        else:
+            offset = zoned_dt.utcoffset()
+            if offset is None:
+                raise HTTPException(status_code=400, detail="Timezone offset could not be resolved.")
+            return offset.total_seconds() / 3600, tz
 
-            .card {{
-                width: min(100%, 520px);
-                padding: 28px;
-                border-radius: 8px;
-                background: #fffdf8;
-                box-shadow: 0 2px 12px rgba(0,0,0,0.08);
-                text-align: center;
-            }}
+    if timezone is None:
+        raise HTTPException(status_code=400, detail="Timezone is required. Pass tz=IANA or numeric timezone.")
 
-            h1 {{
-                margin: 0;
-                font-size: 22px;
-                line-height: 1.25;
-                font-weight: 600;
-                color: #5B3A1A;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>{safe_message}</h1>
-        </div>
-    </body>
-    </html>
-    """
+    return timezone, f"UTC{timezone:+g}"
 
 
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    if request.url.path == "/full/html":
-        return Response(
-            content=build_error_html("Invalid request parameters"),
-            media_type="text/html",
-            status_code=400,
-        )
+def build_graha_payload(short_key, key, name, planet):
+    longitude = planet["longitude"] % 360
+    sign_index = int(longitude // 30)
+    nakshatra_index = int(longitude // NAKSHATRA_SPAN)
+    pada_index = int(longitude // PADA_SPAN)
+    pada_in_nakshatra = int((longitude % NAKSHATRA_SPAN) // PADA_SPAN) + 1
 
-    return JSONResponse(
-        status_code=400,
-        content={"detail": exc.errors()},
-    )
+    return {
+        "key": key,
+        "name": name,
+        "shortKey": short_key,
+        "longitude": round(longitude, 4),
+        "signIndex": sign_index,
+        "degreeInSign": round(longitude % 30, 4),
+        "nakshatraIndex": nakshatra_index,
+        "nakshatraNumber": nakshatra_index + 1,
+        "padaIndex": pada_index,
+        "padaNumber": pada_index + 1,
+        "padaInNakshatra": pada_in_nakshatra,
+    }
 
 
 @app.get("/")
@@ -109,53 +128,115 @@ def root():
     return {"status": "Panchanga API running"}
 
 
+@app.get("/locations/search")
+def locations_search(q: str = "", limit: int = Query(10, ge=1, le=20)):
+    normalized_query = normalize_search_text(q)
+    if not normalized_query:
+        return []
+
+    matches = [
+        location
+        for location in load_seed_locations()
+        if normalized_query in location_search_text(location)
+    ]
+
+    return sorted(
+        matches,
+        key=lambda location: score_location(location, normalized_query),
+    )[:limit]
+
+
+@app.get("/grahas")
+def grahas(
+    date: str = Query(...),
+    time: str = Query("09:00"),
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    tz: str | None = None,
+    timezone: float | None = Query(None, ge=-12, le=14),
+):
+    local_dt = parse_local_datetime(date, time)
+    timezone_offset, timezone_name = resolve_timezone_offset(local_dt, tz, timezone)
+
+    chart_data = calculate_chart(
+        local_dt.year,
+        local_dt.month,
+        local_dt.day,
+        local_dt.hour,
+        local_dt.minute,
+        timezone_offset,
+        lat,
+        lon,
+    )
+
+    return {
+        "input": {
+            "date": date,
+            "time": time,
+            "timezone": timezone_name,
+        },
+        "location": {
+            "latitude": lat,
+            "longitude": lon,
+            "timezone": timezone_name,
+            "utc_offset": timezone_offset,
+            "used_default": False,
+        },
+        "calculation": {
+            "ayanamsa": "Lahiri",
+            "ayanamsaValue": chart_data.get("ayanamsa"),
+            "zodiac": "sidereal",
+        },
+        "grahas": [
+            build_graha_payload(short_key, key, name, chart_data["planets"][short_key])
+            for short_key, key, name in GRAHA_OUTPUT
+        ],
+    }
+
+
 @app.get("/panchanga")
 def panchanga(
-    year: YearParam,
-    month: MonthParam,
-    day: DayParam,
-    hour: HourParam = 9,
-    minute: MinuteParam = 0,
-    timezone: TimezoneParam = 3,
-    latitude: LatitudeParam = 55.7558,
-    longitude: LongitudeParam = 37.6173,
+    year: int,
+    month: int,
+    day: int,
+    hour: int = 9,
+    minute: int = 0,
+    timezone: float = 3,
+    latitude: float = 55.7558,
+    longitude: float = 37.6173,
 ):
-    validate_calendar_date(year, month, day)
-
     return calculate_panchanga(
-        year=year,
-        month=month,
-        day=day,
-        latitude=latitude,
-        longitude=longitude,
-        timezone=timezone,
-        hour=hour,
-        minute=minute,
+        year,
+        month,
+        day,
+        timezone,
+        latitude,
+        longitude,
+        hour,
+        minute,
     )
 
 
 @app.get("/panchanga/text")
 def panchanga_text(
-    year: YearParam,
-    month: MonthParam,
-    day: DayParam,
-    hour: HourParam = 9,
-    minute: MinuteParam = 0,
-    timezone: TimezoneParam = 3,
-    latitude: LatitudeParam = 55.7558,
-    longitude: LongitudeParam = 37.6173,
+    year: int,
+    month: int,
+    day: int,
+    hour: int = 9,
+    minute: int = 0,
+    timezone: float = 3,
+    latitude: float = 55.7558,
+    longitude: float = 37.6173,
 ):
-    validate_calendar_date(year, month, day)
-
     data = calculate_panchanga(
-        year=year,
-        month=month,
-        day=day,
-        latitude=latitude,
-        longitude=longitude,
-        timezone=timezone,
-        hour=hour,
-        minute=minute,
+        year,
+        month,
+        day,
+        timezone,
+        latitude,
+        longitude,
+        hour,
+        minute,
     )
 
     return {
@@ -165,26 +246,24 @@ def panchanga_text(
 
 @app.get("/panchanga/html")
 def panchanga_html(
-    year: YearParam,
-    month: MonthParam,
-    day: DayParam,
-    hour: HourParam = 9,
-    minute: MinuteParam = 0,
-    timezone: TimezoneParam = 3,
-    latitude: LatitudeParam = 55.7558,
-    longitude: LongitudeParam = 37.6173,
+    year: int,
+    month: int,
+    day: int,
+    hour: int = 9,
+    minute: int = 0,
+    timezone: float = 3,
+    latitude: float = 55.7558,
+    longitude: float = 37.6173,
 ):
-    validate_calendar_date(year, month, day)
-
     data = calculate_panchanga(
-        year=year,
-        month=month,
-        day=day,
-        latitude=latitude,
-        longitude=longitude,
-        timezone=timezone,
-        hour=hour,
-        minute=minute,
+        year,
+        month,
+        day,
+        timezone,
+        latitude,
+        longitude,
+        hour,
+        minute,
     )
 
     html = build_panchanga_html(data)
@@ -197,31 +276,20 @@ def panchanga_html(
 
 @app.get("/full/html")
 def full_html(
-    year: OptionalYearParam = None,
-    month: OptionalMonthParam = None,
-    day: OptionalDayParam = None,
-    hour: HourParam = 9,
-    minute: MinuteParam = 0,
-    timezone: TimezoneParam = 3,
-    latitude: LatitudeParam = 55.7558,
-    longitude: LongitudeParam = 37.6173,
+    year: int | None = None,
+    month: int | None = None,
+    day: int | None = None,
+    hour: int = 9,
+    minute: int = 0,
+    timezone: float = 3,
+    latitude: float = 55.7558,
+    longitude: float = 37.6173,
     city: str = "Москва",
-    chart_style: str = "south",
 ):
     today = date.today()
-    is_default_example = year is None and month is None and day is None
     year = year or today.year
     month = month or today.month
     day = day or today.day
-
-    try:
-        current_date = validate_calendar_date(year, month, day)
-    except HTTPException as exc:
-        return Response(
-            content=build_error_html(exc.detail),
-            media_type="text/html",
-            status_code=400,
-        )
 
     safe_city = escape(city)
     input_date = f"{year:04d}-{month:02d}-{day:02d}"
@@ -229,37 +297,16 @@ def full_html(
     latitude_display = f"{latitude:.2f}"
     longitude_display = f"{longitude:.2f}"
     timezone_display = f"{timezone:+.0f}"
-    current_chart_style = chart_style if chart_style in ("south", "north") else "south"
-    south_chart_class = "chart-svg" if current_chart_style == "south" else "chart-svg is-hidden"
-    north_chart_class = "chart-svg" if current_chart_style == "north" else "chart-svg is-hidden"
-
-    def build_day_url(target_date):
-        query = urlencode({
-            "year": target_date.year,
-            "month": target_date.month,
-            "day": target_date.day,
-            "hour": hour,
-            "minute": minute,
-            "timezone": timezone,
-            "latitude": latitude,
-            "longitude": longitude,
-            "city": city,
-            "chart_style": current_chart_style,
-        })
-        return f"/full/html?{query}#chart"
-
-    previous_day_url = build_day_url(current_date - timedelta(days=1))
-    next_day_url = build_day_url(current_date + timedelta(days=1))
 
     panchanga_data = calculate_panchanga(
-        year=year,
-        month=month,
-        day=day,
-        latitude=latitude,
-        longitude=longitude,
-        timezone=timezone,
-        hour=hour,
-        minute=minute,
+        year,
+        month,
+        day,
+        timezone,
+        latitude,
+        longitude,
+        hour,
+        minute,
     )
 
     chart_data = calculate_chart(
@@ -276,8 +323,7 @@ def full_html(
     chart_data["latitude"] = latitude
     chart_data["longitude"] = longitude
 
-    south_svg_chart = generate_south_indian_svg(chart_data)
-    north_svg_chart = generate_north_indian_svg(chart_data)
+    svg_chart = generate_south_indian_svg(chart_data)
 
     text = build_panchanga_text(panchanga_data)
 
@@ -285,44 +331,22 @@ def full_html(
     <html>
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Ведический календарь Панчанга на сегодня</title>
-        <link rel="preconnect" href="https://fonts.googleapis.com">
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 
         <style>
-            html {{
-                box-sizing: border-box;
-                -webkit-text-size-adjust: 100%;
-                overflow-x: hidden;
-            }}
-
-            *,
-            *::before,
-            *::after {{
-                box-sizing: inherit;
-            }}
 
             body {{
                 --button-radius: 25px;
                 --form-gap: 16px;
-                --mono-font: "IBM Plex Mono", "Space Mono", monospace;
-                width: 100%;
-                font-family: var(--mono-font);
+                font-family: Arial, sans-serif;
                 background: #f5f1e8;
                 color: #222;
                 padding: 40px;
-                line-height: 1.58;
-                letter-spacing: 0;
+                line-height: 1.6;
                 max-width: 1000px;
                 margin: auto;
-                overflow-x: hidden;
             }}
 
             .card {{
-                width: 100%;
-                min-width: 0;
                 background: white;
                 padding: 40px;
                 border-radius: 8px;
@@ -330,14 +354,13 @@ def full_html(
             }}
 
             .intro {{
-                margin-bottom: 24px;
+                margin-bottom: 28px;
             }}
 
             .intro h1 {{
                 margin: 0 0 12px;
                 font-size: 32px;
-                line-height: 1.16;
-                font-weight: 600;
+                line-height: 1.2;
                 color: #5B3A1A;
             }}
 
@@ -345,58 +368,23 @@ def full_html(
                 max-width: 860px;
                 margin: 0;
                 font-size: 17px;
-                line-height: 1.62;
-                font-weight: 400;
+                line-height: 1.65;
                 color: #4c4338;
-            }}
-
-            .form-context {{
-                margin: 0 0 18px;
-                padding: 12px 14px;
-                border-left: 3px solid #C69214;
-                border-radius: 6px;
-                background: #fff8ea;
-                color: #5f5548;
-                font-size: 14px;
-                line-height: 1.45;
-                overflow-wrap: anywhere;
-            }}
-
-            .default-example-note {{
-                margin: 0 0 18px;
-                padding: 10px 12px;
-                border-radius: 6px;
-                background: #f5ead8;
-                color: #5B3A1A;
-                font-size: 14px;
-                line-height: 1.42;
             }}
 
             .controls {{
                 display: grid;
-                grid-template-columns: minmax(132px, 1fr) minmax(110px, 0.8fr) minmax(280px, 1.8fr) auto;
+                grid-template-columns: minmax(132px, 1fr) minmax(110px, 0.8fr) minmax(280px, 1.8fr) 96px 96px 72px;
                 column-gap: var(--form-gap);
                 row-gap: var(--form-gap);
                 align-items: start;
-                width: 100%;
-                max-width: 100%;
-                margin-bottom: 8px;
-                min-width: 0;
-            }}
-
-            .form-row {{
-                width: 100%;
-                max-width: 100%;
-                min-width: 0;
+                margin-bottom: var(--form-gap);
             }}
 
             .field {{
                 display: flex;
                 flex-direction: column;
                 gap: 6px;
-                width: 100%;
-                max-width: 100%;
-                min-width: 0;
             }}
 
             .field-city {{
@@ -404,34 +392,20 @@ def full_html(
             }}
 
             label {{
-                max-width: 100%;
                 font-size: 13px;
-                font-weight: 500;
                 color: #5f5548;
-                overflow-wrap: anywhere;
             }}
 
-            input,
-            select {{
+            input {{
+                box-sizing: border-bo
                 width: 100%;
-                max-width: 100%;
-                min-width: 0;
                 min-height: 42px;
                 border: 1px solid #d8cbb7;
                 border-radius: 6px;
                 padding: 8px 10px;
                 font: inherit;
-                font-weight: 400;
                 background: #fffdf8;
                 color: #222;
-            }}
-
-            .controls input,
-            .controls select,
-            .controls button {{
-                width: 100%;
-                max-width: 100%;
-                min-width: 0;
             }}
 
             .suggestions {{
@@ -456,7 +430,6 @@ def full_html(
 
             .suggestion {{
                 width: 100%;
-                min-width: 0;
                 min-height: 38px;
                 border: 0;
                 border-radius: 0;
@@ -477,15 +450,12 @@ def full_html(
             .field-note {{
                 font-size: 12px;
                 line-height: 1.3;
-                font-weight: 400;
                 color: #7a6b58;
             }}
 
             button {{
                 position: relative;
                 overflow: hidden;
-                max-width: 100%;
-                min-width: 0;
                 min-height: 42px;
                 border: 0;
                 border-radius: var(--button-radius);
@@ -546,277 +516,26 @@ def full_html(
             }}
 
             .submit-button {{
-                grid-column: auto;
-                align-self: start;
-                justify-self: stretch;
-                height: 42px;
-                margin: 27px 0 0;
-                padding-top: 0;
-                padding-bottom: 0;
-                white-space: nowrap;
+                grid-column: 1 / -1;
+                justify-self: center;
+                margin: 10px 0;
             }}
 
             .chart {{
-                position: relative;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                width: 100%;
-                min-width: 0;
-                min-height: 470px;
-                overflow: hidden;
                 text-align: center;
-                margin-bottom: 4px;
-                scroll-margin-top: 24px;
-            }}
-
-            .loading-indicator {{
-                position: absolute;
-                inset: 0;
-                z-index: 2;
-                display: none;
-                align-items: center;
-                justify-content: center;
-                background: rgba(255, 253, 247, 0.78);
-                color: #5B3A1A;
-                font-size: 16px;
-                font-weight: 600;
-            }}
-
-            .loading-indicator::before {{
-                content: "";
-                width: 20px;
-                height: 20px;
-                margin-right: 10px;
-                border: 3px solid #eadcc6;
-                border-top-color: #7b4f20;
-                border-radius: 50%;
-                animation: spin 800ms linear infinite;
-            }}
-
-            @keyframes spin {{
-                to {{
-                    transform: rotate(360deg);
-                }}
-            }}
-
-            body.is-loading .chart-svg {{
-                opacity: 0.4;
-                filter: grayscale(0.25);
-            }}
-
-            body.is-loading .loading-indicator {{
-                display: flex;
-            }}
-
-            .chart-svg {{
-                display: flex;
-                justify-content: center;
-                width: min(100%, 420px);
-                min-width: 0;
-                animation: chart-fade-in 220ms ease-out;
-            }}
-
-            @keyframes chart-fade-in {{
-                from {{
-                    opacity: 0;
-                    transform: translateY(4px);
-                }}
-                to {{
-                    opacity: 1;
-                    transform: translateY(0);
-                }}
+                margin-bottom: 30px;
             }}
 
             .chart svg {{
-                display: block;
-                width: 100%;
-                max-width: 420px;
-                height: auto;
-            }}
-
-            .chart-svg.is-hidden {{
-                display: none;
-            }}
-
-            .day-nav {{
-                display: flex;
-                flex-wrap: wrap;
-                justify-content: center;
-                gap: 12px;
-                width: 100%;
-                max-width: 100%;
-                margin: 0 0 18px;
-            }}
-
-            .day-nav a {{
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                max-width: 100%;
-                min-width: 0;
-                min-height: 42px;
-                border: 1px solid #d8cbb7;
-                border-radius: var(--button-radius);
-                padding: 9px 16px;
-                background: #fffdf8;
-                color: #5B3A1A;
-                font-weight: 600;
-                text-decoration: none;
-                overflow-wrap: anywhere;
-                transition:
-                    background-color 120ms ease,
-                    border-color 120ms ease,
-                    color 120ms ease,
-                    transform 120ms ease;
-            }}
-
-            .day-nav a:hover {{
-                border-color: #C69214;
-                background: #f5ead8;
-                color: #3f2812;
-            }}
-
-            .day-nav a:active {{
-                transform: scale(0.98);
-            }}
-
-            @media (prefers-color-scheme: dark) {{
-                .day-nav a {{
-                    border-color: #8b765b;
-                    background: #2a241d;
-                    color: #f2dfbd;
-                }}
-
-                .day-nav a:hover {{
-                    border-color: #D4AF37;
-                    background: #3a3025;
-                    color: #fff3d4;
-                }}
+                width: 420px;
+                height: 420px;
             }}
 
             pre {{
                 white-space: pre-wrap;
-                overflow-wrap: anywhere;
-                font-family: var(--mono-font);
+                font-family: Arial, sans-serif;
                 font-size: 17px;
-                line-height: 1.68;
-                font-weight: 400;
-            }}
-
-            .panchanga-output {{
-                white-space: normal;
-                min-width: 0;
-                overflow-wrap: anywhere;
-                margin-top: 0;
-            }}
-
-            .page-footer {{
-                margin-top: 34px;
-                padding-top: 22px;
-                border-top: 1px solid #eadcc6;
-                color: #4c4338;
-            }}
-
-            .footer-title {{
-                margin: 0 0 6px;
-                font-size: 16px;
-                line-height: 1.35;
-                font-weight: 600;
-                color: #5B3A1A;
-            }}
-
-            .footer-section {{
-                padding: 0;
-            }}
-
-            .footer-section + .footer-section {{
-                margin-top: 18px;
-                padding-top: 18px;
-                border-top: 1px solid #f0e4d2;
-            }}
-
-            .footer-copy {{
-                max-width: 780px;
-                margin: 0 0 12px;
-                font-size: 14px;
-                line-height: 1.48;
-                color: #6b5c4b;
-            }}
-
-            .footer-links {{
-                display: flex;
-                flex-wrap: wrap;
-                gap: 10px;
-            }}
-
-            .footer-link {{
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                min-height: 40px;
-                border: 1px solid #d8cbb7;
-                border-radius: var(--button-radius);
-                padding: 8px 14px;
-                background: #fffdf8;
-                color: #5B3A1A;
-                font-size: 14px;
-                line-height: 1.25;
-                font-weight: 600;
-                text-decoration: none;
-                transition:
-                    background-color 120ms ease,
-                    border-color 120ms ease,
-                    color 120ms ease,
-                    transform 120ms ease;
-            }}
-
-            .footer-link:hover {{
-                border-color: #C69214;
-                background: #f5ead8;
-                color: #3f2812;
-            }}
-
-            .footer-link:active {{
-                transform: scale(0.98);
-            }}
-
-            .footer-link svg {{
-                width: 18px;
-                height: 18px;
-                flex: 0 0 auto;
-                fill: currentColor;
-            }}
-
-            @media (prefers-color-scheme: dark) {{
-                .page-footer {{
-                    border-top-color: #4a3d30;
-                    color: #e6d5ba;
-                }}
-
-                .footer-title {{
-                    color: #f2dfbd;
-                }}
-
-                .footer-section + .footer-section {{
-                    border-top-color: #4a3d30;
-                }}
-
-                .footer-copy {{
-                    color: #d8c4a5;
-                }}
-
-                .footer-link {{
-                    border-color: #8b765b;
-                    background: #2a241d;
-                    color: #f2dfbd;
-                }}
-
-                .footer-link:hover {{
-                    border-color: #D4AF37;
-                    background: #3a3025;
-                    color: #fff3d4;
-                }}
+                line-height: 1.8;
             }}
 
             @media (max-width: 820px) {{
@@ -840,85 +559,38 @@ def full_html(
                     font-size: 15px;
                 }}
 
-                .form-context,
-                .default-example-note {{
-                    font-size: 13px;
-                }}
-
                 .controls {{
-                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                    grid-template-columns: repeat(6, minmax(0, 1fr));
                 }}
 
                 .field-date,
                 .field-time {{
-                    grid-column: span 1;
+                    grid-column: span 3;
                 }}
 
                 .field-city {{
-                    grid-column: 1 / -1;
+                    grid-column: span 6;
+                }}
+
+                .field-timezone {{
+                    grid-column: 1 / span 2;
+                    grid-row: 4;
+                }}
+
+                .field-latitude {{
+                    grid-column: 3 / span 2;
+                    grid-row: 4;
+                }}
+
+                .field-longitude {{
+                    grid-column: 5 / span 2;
+                    grid-row: 4;
                 }}
 
                 .submit-button {{
                     grid-column: 1 / -1;
-                    justify-self: center;
+                    grid-row: 5;
                     width: min(100%, 240px);
-                    margin: 0;
-                }}
-
-                .chart {{
-                    min-height: 0;
-                    padding: 14px 0 12px;
-                }}
-
-                .day-nav {{
-                    flex-wrap: nowrap;
-                    gap: 8px;
-                }}
-
-                .day-nav a {{
-                    flex: 1 1 0;
-                    padding: 8px 10px;
-                    font-size: 14px;
-                    line-height: 1.2;
-                    text-align: center;
-                    white-space: nowrap;
-                }}
-            }}
-
-            @media (max-width: 420px) {{
-                body {{
-                    padding: 10px;
-                }}
-
-                .card {{
-                    padding: 14px;
-                }}
-
-                .controls {{
-                    grid-template-columns: 1fr;
-                }}
-
-                .field-date,
-                .field-time,
-                .field-city {{
-                    grid-column: 1 / -1;
-                }}
-
-                .intro h1 {{
-                    font-size: 22px;
-                }}
-
-                .footer-link {{
-                    width: 100%;
-                }}
-
-                .day-nav {{
-                    gap: 6px;
-                }}
-
-                .day-nav a {{
-                    padding: 8px 6px;
-                    font-size: 12px;
                 }}
             }}
 
@@ -960,20 +632,6 @@ def full_html(
             function formatCoordinate(value) {{
                 return Number(value).toFixed(2);
             }}
-
-            const LOCAL_CITY_FALLBACKS = [
-                {{
-                    name: "Гатчина",
-                    lat: "59.5684",
-                    lon: "30.1229",
-                    address: {{
-                        city: "Гатчина",
-                        state: "Ленинградская область",
-                        country_code: "ru"
-                    }},
-                    timezone: 3
-                }}
-            ];
 
             async function resolveTimezone(latitude, longitude) {{
                 const url = new URL("https://timeapi.io/api/TimeZone/coordinate");
@@ -1088,40 +746,15 @@ def full_html(
                 }});
             }}
 
-            function getLocalCityFallbacks(query) {{
-                const normalizedQuery = normalizeAddressPart(query);
-                if (normalizedQuery.length < 2) {{
-                    return [];
-                }}
-
-                return LOCAL_CITY_FALLBACKS.filter((place) => {{
-                    const title = normalizeAddressPart(place.name);
-                    return title.startsWith(normalizedQuery) || title.includes(normalizedQuery);
-                }});
-            }}
-
             async function searchCities(query) {{
-                const localPlaces = getLocalCityFallbacks(query);
-                let russianPlaces = [];
-                let globalPlaces = [];
-
-                try {{
-                    russianPlaces = await fetchCities(query, "ru");
-                    if (russianPlaces.length >= 8) {{
-                        return sortExactCityFirst(dedupePlaces([...localPlaces, ...russianPlaces]), query).slice(0, 8);
-                    }}
-
-                    globalPlaces = await fetchCities(query);
-                }} catch (error) {{
-                    if (localPlaces.length) {{
-                        return sortExactCityFirst(localPlaces, query).slice(0, 8);
-                    }}
-
-                    throw error;
+                const russianPlaces = await fetchCities(query, "ru");
+                if (russianPlaces.length >= 8) {{
+                    return sortExactCityFirst(dedupePlaces(russianPlaces), query).slice(0, 8);
                 }}
 
+                const globalPlaces = await fetchCities(query);
                 return sortExactCityFirst(sortRussianFirst(
-                    dedupePlaces([...localPlaces, ...russianPlaces, ...globalPlaces])
+                    dedupePlaces([...russianPlaces, ...globalPlaces])
                 ), query).slice(0, 8);
             }}
 
@@ -1160,7 +793,7 @@ def full_html(
                 async function selectCity(place) {{
                     const latitude = Number(place.lat);
                     const longitude = Number(place.lon);
-                    const fallbackTimezone = place.timezone || estimateTimezoneFromLongitude(longitude);
+                    const fallbackTimezone = estimateTimezoneFromLongitude(longitude);
 
                     cityInput.value = getCityTitle(place);
                     latInput.value = formatCoordinate(latitude);
@@ -1225,50 +858,25 @@ def full_html(
                 }});
             }}
 
-            function setupLoadingState() {{
-                const form = document.querySelector(".controls");
-                const dayLinks = document.querySelectorAll(".day-nav a");
-
-                function showLoading() {{
-                    document.body.classList.add("is-loading");
-                }}
-
-                if (form) {{
-                    form.addEventListener("submit", showLoading);
-                }}
-
-                dayLinks.forEach((link) => {{
-                    link.addEventListener("click", showLoading);
-                }});
-            }}
-
             function setupInfoblockToggle() {{
-                const toggles = document.querySelectorAll(".chart-infoblock-toggle");
-                const infoblocks = document.querySelectorAll(".chart-infoblock-data");
-                const eyeOns = document.querySelectorAll(".chart-eye-on");
-                const eyeOffs = document.querySelectorAll(".chart-eye-off");
-                if (!toggles.length || !infoblocks.length || !eyeOns.length || !eyeOffs.length) {{
+                const toggle = document.querySelector("#toggle-infoblock");
+                const infoblock = document.querySelector(".chart-infoblock-data");
+                const eyeOn = document.querySelector(".chart-eye-on");
+                const eyeOff = document.querySelector(".chart-eye-off");
+                if (!toggle || !infoblock || !eyeOn || !eyeOff) {{
                     return;
                 }}
 
                 let hidden = false;
 
                 function updateToggle() {{
-                    infoblocks.forEach((infoblock) => {{
-                        infoblock.style.display = hidden ? "none" : "";
-                    }});
-                    eyeOns.forEach((eyeOn) => {{
-                        eyeOn.style.display = hidden ? "none" : "";
-                    }});
-                    eyeOffs.forEach((eyeOff) => {{
-                        eyeOff.style.display = hidden ? "" : "none";
-                    }});
-                    toggles.forEach((toggle) => {{
-                        toggle.setAttribute(
-                            "aria-label",
-                            hidden ? "Показать данные инфоблока карты" : "Скрыть данные инфоблока карты"
-                        );
-                    }});
+                    infoblock.style.display = hidden ? "none" : "";
+                    eyeOn.style.display = hidden ? "none" : "";
+                    eyeOff.style.display = hidden ? "" : "none";
+                    toggle.setAttribute(
+                        "aria-label",
+                        hidden ? "Показать данные инфоблока карты" : "Скрыть данные инфоблока карты"
+                    );
                 }}
 
                 function toggleInfoblock() {{
@@ -1276,76 +884,19 @@ def full_html(
                     updateToggle();
                 }}
 
-                toggles.forEach((toggle) => {{
-                    toggle.addEventListener("click", toggleInfoblock);
-                    toggle.addEventListener("keydown", (event) => {{
-                        if (event.key === "Enter" || event.key === " ") {{
-                            event.preventDefault();
-                            toggleInfoblock();
-                        }}
-                    }});
+                toggle.addEventListener("click", toggleInfoblock);
+                toggle.addEventListener("keydown", (event) => {{
+                    if (event.key === "Enter" || event.key === " ") {{
+                        event.preventDefault();
+                        toggleInfoblock();
+                    }}
                 }});
                 updateToggle();
             }}
 
-            function setupChartStyleToggle() {{
-                const toggles = document.querySelectorAll(".chart-style-toggle");
-                const southChart = document.querySelector("[data-chart-style='south']");
-                const northChart = document.querySelector("[data-chart-style='north']");
-                const chartStyleInput = document.querySelector("[name='chart_style']");
-                const dayNavLinks = document.querySelectorAll(".day-nav a");
-                if (!toggles.length || !southChart || !northChart) {{
-                    return;
-                }}
-
-                let currentStyle = "{current_chart_style}";
-
-                function setLinkChartStyle(link) {{
-                    const url = new URL(link.href, window.location.origin);
-                    url.searchParams.set("chart_style", currentStyle);
-                    url.hash = "chart";
-                    link.href = `${{url.pathname}}${{url.search}}${{url.hash}}`;
-                }}
-
-                function updateStyle() {{
-                    southChart.classList.toggle("is-hidden", currentStyle !== "south");
-                    northChart.classList.toggle("is-hidden", currentStyle !== "north");
-                    if (chartStyleInput) {{
-                        chartStyleInput.value = currentStyle;
-                    }}
-                    dayNavLinks.forEach(setLinkChartStyle);
-                    toggles.forEach((toggle) => {{
-                        toggle.setAttribute(
-                            "aria-label",
-                            currentStyle === "south"
-                                ? "Переключить на северный стиль карты"
-                                : "Переключить на южный стиль карты"
-                        );
-                    }});
-                }}
-
-                function toggleStyle() {{
-                    currentStyle = currentStyle === "south" ? "north" : "south";
-                    updateStyle();
-                }}
-
-                toggles.forEach((toggle) => {{
-                    toggle.addEventListener("click", toggleStyle);
-                    toggle.addEventListener("keydown", (event) => {{
-                        if (event.key === "Enter" || event.key === " ") {{
-                            event.preventDefault();
-                            toggleStyle();
-                        }}
-                    }});
-                }});
-                updateStyle();
-            }}
-
             window.addEventListener("DOMContentLoaded", () => {{
                 setupCityAutocomplete();
-                setupLoadingState();
                 setupInfoblockToggle();
-                setupChartStyleToggle();
             }});
         </script>
     </head>
@@ -1355,17 +906,13 @@ def full_html(
         <div class="card">
 
             <section class="intro">
-                <h1>Панчанга дня</h1>
-                <p>Выберите дату, время и место, для которых нужно рассчитать состояние дня по ведическому лунному календарю. Панчанга показывает качество времени: день недели, лунные сутки, накшатру и рекомендации.</p>
+                <h1>Ведический календарь Панчанга и астрологическая карта на каждый день</h1>
+                <p>Профессиональный астролог всегда начинает день со взгляда на небо и понимания качества времени. Здесь вы можете построить Джйотиш-карту на каждый день, согласно Ведическому лунному календарю Панчанга с автоматическим анализом характеристик дня. Вы сможете оценить день недели, лунные сутки, накшатру (созвездие) в котором сейчас находится Луна и получить полезные рекомендации.</p>
             </section>
-
-            <p class="form-context">Это не дата рождения. Это дата и время события или текущего момента, для которого строится Панчанга. Для натальной карты используйте дату, время и город рождения. Для Панчанги дня — текущую дату, время и город.</p>
-
-            {"<p class=\"default-example-note\">Сейчас показан пример: Москва, текущая дата, 09:00.</p>" if is_default_example else ""}
 
             <form class="controls" method="get" action="/full/html" onsubmit="syncDateTimeFields(this)">
                 <div class="field field-date">
-                    <label for="date">Дата расчёта</label>
+                    <label for="date">Дата</label>
                     <input id="date" type="date" value="{input_date}">
                     <input name="year" type="hidden" value="{year}">
                     <input name="month" type="hidden" value="{month}">
@@ -1373,86 +920,42 @@ def full_html(
                 </div>
 
                 <div class="field field-time">
-                    <label for="time">Время расчёта</label>
+                    <label for="time">Время</label>
                     <input id="time" type="time" value="{input_time}">
                     <input name="hour" type="hidden" value="{hour}">
                     <input name="minute" type="hidden" value="{minute}">
                 </div>
 
                 <div class="field field-city">
-                    <label for="city">Место расчёта</label>
+                    <label for="city">Город</label>
                     <input id="city" name="city" type="text" value="{safe_city}">
                     <div id="city-suggestions" class="suggestions"></div>
                     <div id="city-note" class="field-note" aria-live="polite"></div>
                 </div>
 
-                <input id="latitude" name="latitude" type="hidden" value="{latitude_display}">
-                <input id="longitude" name="longitude" type="hidden" value="{longitude_display}">
-                <input id="timezone" name="timezone" type="hidden" value="{timezone_display}">
+                <div class="field field-latitude">
+                    <label for="latitude">Широта</label>
+                    <input id="latitude" name="latitude" type="number" step="0.01" value="{latitude_display}">
+                </div>
 
-                <input name="chart_style" type="hidden" value="{current_chart_style}">
+                <div class="field field-longitude">
+                    <label for="longitude">Долгота</label>
+                    <input id="longitude" name="longitude" type="number" step="0.01" value="{longitude_display}">
+                </div>
 
-                <button class="submit-button" type="submit">Рассчитать Панчангу</button>
+                <div class="field field-timezone">
+                    <label for="timezone">UTC</label>
+                    <input id="timezone" name="timezone" type="text" inputmode="numeric" pattern="[+-]?[0-9]+" value="{timezone_display}">
+                </div>
+
+                <button class="submit-button" type="submit">Рассчитать</button>
             </form>
 
-            <div id="chart" class="chart">
-                <div class="loading-indicator" aria-live="polite">Пересчитываем Панчангу...</div>
-                <div class="{south_chart_class}" data-chart-style="south">
-                    {south_svg_chart}
-                </div>
-                <div class="{north_chart_class}" data-chart-style="north">
-                    {north_svg_chart}
-                </div>
+            <div class="chart">
+                {svg_chart}
             </div>
 
-            <nav class="day-nav" aria-label="Навигация по дням">
-                <a href="{previous_day_url}">← Предыдущий день</a>
-                <a href="{next_day_url}">Следующий день →</a>
-            </nav>
-
-            <div class="panchanga-output">
-                {text}
-            </div>
-
-            <footer class="page-footer">
-                <section class="footer-section">
-                    <p class="footer-title">Личные консультации</p>
-                    <p class="footer-copy">Для личных консультаций и разбора натальной карты пишите в Telegram.</p>
-                    <div class="footer-links">
-                        <a class="footer-link" href="https://t.me/vedascopebot" target="_blank" rel="noopener noreferrer">
-                            <svg viewBox="0 0 24 24" aria-hidden="true">
-                                <path d="M21.8 4.4 18.5 20c-.2 1-1 1.2-1.8.7l-5-3.7-2.4 2.3c-.3.3-.5.5-1 .5l.4-5.2 9.4-8.5c.4-.4-.1-.6-.6-.2L5.8 13.2.8 11.6c-1-.3-1-1 .2-1.5L20.4 2.6c.9-.3 1.7.2 1.4 1.8Z"/>
-                            </svg>
-                            Telegram @vedascopebot
-                        </a>
-                    </div>
-                </section>
-
-                <section class="footer-section">
-                    <p class="footer-title">Канал о Джйотиш-астрологии Vedascope</p>
-                    <p class="footer-copy">Подписывайтесь на Vedascope: примеры разборов, интервью с Гуру, обсуждения практики Джйотиш и другие материалы.</p>
-                    <div class="footer-links">
-                        <a class="footer-link" href="https://t.me/vedascope" target="_blank" rel="noopener noreferrer">
-                            <svg viewBox="0 0 24 24" aria-hidden="true">
-                                <path d="M21.8 4.4 18.5 20c-.2 1-1 1.2-1.8.7l-5-3.7-2.4 2.3c-.3.3-.5.5-1 .5l.4-5.2 9.4-8.5c.4-.4-.1-.6-.6-.2L5.8 13.2.8 11.6c-1-.3-1-1 .2-1.5L20.4 2.6c.9-.3 1.7.2 1.4 1.8Z"/>
-                            </svg>
-                            Telegram @vedascope
-                        </a>
-                        <a class="footer-link" href="https://www.youtube.com/@vedascope" target="_blank" rel="noopener noreferrer">
-                            <svg viewBox="0 0 24 24" aria-hidden="true">
-                                <path d="M23.5 6.2s-.2-1.7-.9-2.4c-.9-.9-1.8-.9-2.3-1C17.1 2.5 12 2.5 12 2.5s-5.1 0-8.3.3c-.5.1-1.5.1-2.3 1C.7 4.5.5 6.2.5 6.2S.2 8.1.2 10v1.8c0 1.9.3 3.8.3 3.8s.2 1.7.9 2.4c.9.9 2 .9 2.5 1 1.8.2 8.1.3 8.1.3s5.1 0 8.3-.3c.5-.1 1.5-.1 2.3-1 .7-.7.9-2.4.9-2.4s.3-1.9.3-3.8V10c0-1.9-.3-3.8-.3-3.8ZM9.6 14.1V7.5l6.4 3.3-6.4 3.3Z"/>
-                            </svg>
-                            YouTube @vedascope
-                        </a>
-                        <a class="footer-link" href="https://vk.com/vedascope" target="_blank" rel="noopener noreferrer">
-                            <svg viewBox="0 0 24 24" aria-hidden="true">
-                                <path d="M13.2 17.8c-5.1 0-8-3.5-8.1-9.3h2.6c.1 4.3 2 6.1 3.5 6.5V8.5h2.5v3.7c1.5-.2 3-1.8 3.5-3.7h2.5c-.4 2.3-2.1 3.9-3.3 4.6 1.2.6 3.2 2 4 4.7h-2.8c-.5-1.8-1.9-3.2-3.4-3.5v3.5h-.5Z"/>
-                            </svg>
-                            VK @vedascope
-                        </a>
-                    </div>
-                </section>
-            </footer>
+            <pre>{text}</pre>
 
         </div>
 
@@ -1468,19 +971,17 @@ def full_html(
 
 @app.get("/chart/svg")
 def chart_svg(
-    year: YearParam,
-    month: MonthParam,
-    day: DayParam,
-    hour: HourParam,
-    minute: MinuteParam,
-    timezone: TimezoneParam,
-    latitude: LatitudeParam,
-    longitude: LongitudeParam,
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+    timezone: float,
+    latitude: float,
+    longitude: float,
     city: str = "Москва",
     chart_title: str = "Панчанга",
 ):
-    validate_calendar_date(year, month, day)
-
     data = calculate_chart(
         year,
         month,
