@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from astro.panchanga import calculate_panchanga
 from astro.chart import calculate_chart
 
-from astro.south_chart import generate_south_indian_svg
+from astro.south_chart import generate_south_indian_svg, generate_north_indian_svg
 
 from astro.text_builder import build_panchanga_text
 from astro.html_builder import build_panchanga_html
@@ -1129,6 +1129,7 @@ def chart_svg(
     longitude: float,
     city: str = "Москва",
     chart_title: str = "Панчанга",
+    chart_style: str = "south",
 ):
     data = calculate_chart(
         year,
@@ -1145,7 +1146,11 @@ def chart_svg(
     data["latitude"] = latitude
     data["longitude"] = longitude
 
-    svg = generate_south_indian_svg(data)
+    normalized_style = (chart_style or "south").lower()
+    if normalized_style == "north":
+        svg = generate_north_indian_svg(data)
+    else:
+        svg = generate_south_indian_svg(data)
 
     return Response(
         content=svg,
