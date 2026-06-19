@@ -24,7 +24,8 @@ DEFAULT_CALC_MINUTE = 0
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 TELEGRAM_MESSAGE_LIMIT = 4096
 TELEGRAM_SAFE_MESSAGE_LIMIT = min(3800, TELEGRAM_MESSAGE_LIMIT - 100)
-FULL_PANCHANGA_URL = "https://panchanga.vedascope.ru/full/html"
+FULL_PANCHANGA_URL = "http://127.0.0.1:8000/full/html"
+PUBLIC_PANCHANGA_URL = "https://vedascope.ru/panchanga"
 
 LOGGER = logging.getLogger("daily_post")
 
@@ -310,7 +311,7 @@ def build_daily_text(panchanga):
         )
 
     sections.append(
-        f'🔗 <a href="{escape_html(FULL_PANCHANGA_URL)}">Открыть Панчангу в браузере</a>'
+        f'🔗 <a href="{escape_html(PUBLIC_PANCHANGA_URL)}">Открыть Панчангу в браузере</a>'
     )
 
     return "\n\n".join(section for section in sections if section).strip()
@@ -343,7 +344,7 @@ def build_compact_daily_text(panchanga):
                     "</blockquote>",
                 ]
             ),
-            f'🔗 <a href="{escape_html(FULL_PANCHANGA_URL)}">Открыть Панчангу в браузере</a>',
+            f'🔗 <a href="{escape_html(PUBLIC_PANCHANGA_URL)}">Открыть Панчангу в браузере</a>',
         ]
     )
 
