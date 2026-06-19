@@ -2,7 +2,8 @@
 
 ## `GET /locations/search`
 
-Seed-backed location search for panchanga clients.
+GeoNames-backed location search for panchanga clients, with seed JSON kept as
+manual override and fallback.
 
 Example:
 
@@ -34,6 +35,15 @@ Production nginx should expose this as:
 ```http
 GET /api/locations/search?q=ам
 ```
+
+Search order:
+
+1. `data/locations.seed.json`
+2. `data/locations.sqlite`
+
+Seed results rank above GeoNames results. If `data/locations.sqlite` is missing,
+the endpoint still returns seed results. GeoNames rows use country/admin codes
+until localized country and region names are added.
 
 ## `GET /grahas`
 

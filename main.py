@@ -1,7 +1,11 @@
 from html import escape
 import json
+import re
+import sqlite3
+import string
 from datetime import date, datetime
 from pathlib import Path
+import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -18,6 +22,7 @@ from astro.html_builder import build_panchanga_html
 app = FastAPI()
 
 LOCATION_SEED_PATH = Path(__file__).resolve().parent / "data" / "locations.seed.json"
+LOCATION_DB_PATH = Path(__file__).resolve().parent / "data" / "locations.sqlite"
 NAKSHATRA_SPAN = 360 / 27
 PADA_SPAN = 360 / 108
 GRAHA_OUTPUT = [
@@ -33,8 +38,14 @@ GRAHA_OUTPUT = [
 ]
 
 
+SEARCH_PUNCTUATION = str.maketrans({char: " " for char in string.punctuation + "«»“”„’‘´`№"})
+
+
 def normalize_search_text(value):
-    return str(value or "").strip().lower().replace("ё", "е")
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.strip().lower().replace("ё", "е")
+    text = text.translate(SEARCH_PUNCTUATION)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def load_seed_locations():
@@ -67,6 +78,131 @@ def score_location(location, query):
     if normalized_query in location_search_text(location):
         return 2
     return 9
+
+
+def sqlite_location_is_seed_duplicate(location, seed_locations):
+    try:
+        latitude = float(location["latitude"])
+        longitude = float(location["longitude"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    timezone = location.get("timezone")
+    for seed in seed_locations:
+        if timezone != seed.get("timezone"):
+            continue
+        try:
+            seed_latitude = float(seed["latitude"])
+            seed_longitude = float(seed["longitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if abs(latitude - seed_latitude) <= 0.35 and abs(longitude - seed_longitude) <= 0.35:
+            return True
+    return False
+
+
+def db_available():
+    return LOCATION_DB_PATH.exists()
+
+
+def search_sqlite_locations(query, limit):
+    if not db_available():
+        return []
+
+    normalized_query = normalize_search_text(query)
+    like_prefix = f"{normalized_query}%"
+    like_contains = f"%{normalized_query}%"
+
+    sql = """
+        WITH ranked_names AS (
+            SELECT
+                geoname_id,
+                name AS matched_name,
+                kind,
+                CASE
+                    WHEN normalized = :query THEN 0
+                    WHEN normalized LIKE :prefix THEN 1
+                    WHEN normalized LIKE :contains THEN 2
+                    ELSE 9
+                END AS match_rank,
+                CASE kind
+                    WHEN 'canonical' THEN 0
+                    WHEN 'ascii' THEN 1
+                    ELSE 2
+                END AS kind_rank
+            FROM location_names
+            WHERE normalized = :query
+               OR normalized LIKE :prefix
+               OR normalized LIKE :contains
+        ),
+        best_names AS (
+            SELECT
+                geoname_id,
+                matched_name,
+                kind,
+                match_rank,
+                kind_rank,
+                ROW_NUMBER() OVER (
+                    PARTITION BY geoname_id
+                    ORDER BY match_rank, kind_rank, length(matched_name)
+                ) AS row_number
+            FROM ranked_names
+        )
+        SELECT
+            l.geoname_id,
+            l.name,
+            l.ascii_name,
+            l.alternate_names,
+            l.country_code,
+            l.admin1_code,
+            l.admin2_code,
+            l.latitude,
+            l.longitude,
+            l.timezone,
+            l.population,
+            l.feature_code,
+            b.matched_name,
+            b.match_rank,
+            b.kind_rank
+        FROM best_names b
+        JOIN locations l ON l.geoname_id = b.geoname_id
+        WHERE b.row_number = 1
+        ORDER BY b.match_rank, l.population DESC, b.kind_rank, l.name
+        LIMIT :limit
+    """
+
+    with sqlite3.connect(f"file:{LOCATION_DB_PATH}?mode=ro", uri=True) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            sql,
+            {
+                "query": normalized_query,
+                "prefix": like_prefix,
+                "contains": like_contains,
+                "limit": limit,
+            },
+        ).fetchall()
+
+    results = []
+    for row in rows:
+        aliases = []
+        for value in [row["ascii_name"], row["matched_name"]]:
+            if value and value != row["name"] and value not in aliases:
+                aliases.append(value)
+
+        results.append({
+            "id": f"geonames:{row['geoname_id']}",
+            "name": row["name"],
+            "country": row["country_code"],
+            "region": row["admin1_code"] or row["admin2_code"] or "",
+            "latitude": row["latitude"],
+            "longitude": row["longitude"],
+            "timezone": row["timezone"],
+            "aliases": aliases,
+            "source": "geonames",
+        })
+
+    return results
 
 
 def parse_local_datetime(date_value, time_value):
@@ -134,16 +270,28 @@ def locations_search(q: str = "", limit: int = Query(10, ge=1, le=20)):
     if not normalized_query:
         return []
 
-    matches = [
+    seed_locations = load_seed_locations()
+    seed_matches = [
         location
-        for location in load_seed_locations()
+        for location in seed_locations
         if normalized_query in location_search_text(location)
     ]
-
-    return sorted(
-        matches,
+    seed_results = sorted(
+        seed_matches,
         key=lambda location: score_location(location, normalized_query),
-    )[:limit]
+    )
+
+    remaining_limit = limit - len(seed_results)
+    if remaining_limit <= 0:
+        return seed_results[:limit]
+
+    sqlite_results = [
+        location
+        for location in search_sqlite_locations(normalized_query, remaining_limit + len(seed_locations))
+        if not sqlite_location_is_seed_duplicate(location, seed_locations)
+    ]
+
+    return (seed_results + sqlite_results)[:limit]
 
 
 @app.get("/grahas")
