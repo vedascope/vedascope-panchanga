@@ -452,11 +452,11 @@ def panchanga(
         year,
         month,
         day,
-        timezone,
-        latitude,
-        longitude,
-        hour,
-        minute,
+        latitude=latitude,
+        longitude=longitude,
+        timezone=timezone,
+        hour=hour,
+        minute=minute,
     )
 
 
@@ -475,11 +475,11 @@ def panchanga_text(
         year,
         month,
         day,
-        timezone,
-        latitude,
-        longitude,
-        hour,
-        minute,
+        latitude=latitude,
+        longitude=longitude,
+        timezone=timezone,
+        hour=hour,
+        minute=minute,
     )
 
     return {
@@ -502,11 +502,11 @@ def panchanga_html(
         year,
         month,
         day,
-        timezone,
-        latitude,
-        longitude,
-        hour,
-        minute,
+        latitude=latitude,
+        longitude=longitude,
+        timezone=timezone,
+        hour=hour,
+        minute=minute,
     )
 
     html = build_panchanga_html(data)
@@ -545,11 +545,11 @@ def full_html(
         year,
         month,
         day,
-        timezone,
-        latitude,
-        longitude,
-        hour,
-        minute,
+        latitude=latitude,
+        longitude=longitude,
+        timezone=timezone,
+        hour=hour,
+        minute=minute,
     )
 
     chart_data = calculate_chart(
