@@ -39,6 +39,23 @@ GRAHA_OUTPUT = [
 
 
 SEARCH_PUNCTUATION = str.maketrans({char: " " for char in string.punctuation + "«»“”„’‘´`№"})
+CYRILLIC_RE = re.compile(r"[\u0400-\u052f]")
+COUNTRY_DISPLAY_NAMES_RU = {
+    "RU": "Россия",
+    "BY": "Беларусь",
+    "KZ": "Казахстан",
+    "UZ": "Узбекистан",
+    "KG": "Кыргызстан",
+    "AM": "Армения",
+    "GE": "Грузия",
+    "AZ": "Азербайджан",
+    "UA": "Украина",
+    "NL": "Нидерланды",
+    "US": "США",
+    "JP": "Япония",
+    "IN": "Индия",
+}
+CIS_COUNTRY_CODES = {"BY", "KZ", "UZ", "KG", "AM", "GE", "AZ", "UA"}
 
 
 def normalize_search_text(value):
@@ -46,6 +63,55 @@ def normalize_search_text(value):
     text = text.strip().lower().replace("ё", "е")
     text = text.translate(SEARCH_PUNCTUATION)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def contains_cyrillic(value):
+    return bool(CYRILLIC_RE.search(str(value or "")))
+
+
+def country_priority(country_code):
+    if country_code == "RU":
+        return 0
+    if country_code in CIS_COUNTRY_CODES:
+        return 1
+    return 2
+
+
+def choose_location_display_name(row, query):
+    canonical_name = row["name"]
+    matched_name = row["matched_name"]
+    alternate_names = [name.strip() for name in (row["alternate_names"] or "").split(",") if name.strip()]
+
+    if contains_cyrillic(query) and contains_cyrillic(matched_name):
+        return matched_name
+    if contains_cyrillic(matched_name):
+        return matched_name
+    if contains_cyrillic(canonical_name):
+        return canonical_name
+    return next((name for name in alternate_names if contains_cyrillic(name)), canonical_name)
+
+
+def clean_location_aliases(display_name, candidates, max_aliases=8):
+    display_normalized = normalize_search_text(display_name)
+    aliases = []
+    seen = {display_normalized}
+
+    for candidate in candidates:
+        normalized = normalize_search_text(candidate)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        aliases.append(candidate)
+        if len(aliases) >= max_aliases:
+            break
+
+    return aliases
+
+
+def build_location_aliases(row, display_name):
+    alternate_names = [name.strip() for name in (row["alternate_names"] or "").split(",") if name.strip()]
+    candidates = [row["name"], row["ascii_name"], row["matched_name"], *alternate_names]
+    return clean_location_aliases(display_name, candidates)
 
 
 def load_seed_locations():
@@ -167,7 +233,16 @@ def search_sqlite_locations(query, limit):
         FROM best_names b
         JOIN locations l ON l.geoname_id = b.geoname_id
         WHERE b.row_number = 1
-        ORDER BY b.match_rank, l.population DESC, b.kind_rank, l.name
+        ORDER BY
+            b.match_rank,
+            b.kind_rank,
+            CASE
+                WHEN l.country_code = 'RU' THEN 0
+                WHEN l.country_code IN ('BY', 'KZ', 'UZ', 'KG', 'AM', 'GE', 'AZ', 'UA') THEN 1
+                ELSE 2
+            END,
+            l.population DESC,
+            l.name
         LIMIT :limit
     """
 
@@ -185,21 +260,22 @@ def search_sqlite_locations(query, limit):
 
     results = []
     for row in rows:
-        aliases = []
-        for value in [row["ascii_name"], row["matched_name"]]:
-            if value and value != row["name"] and value not in aliases:
-                aliases.append(value)
+        display_name = choose_location_display_name(row, normalized_query)
 
         results.append({
             "id": f"geonames:{row['geoname_id']}",
-            "name": row["name"],
-            "country": row["country_code"],
+            "name": display_name,
+            "country": COUNTRY_DISPLAY_NAMES_RU.get(row["country_code"], row["country_code"]),
             "region": row["admin1_code"] or row["admin2_code"] or "",
             "latitude": row["latitude"],
             "longitude": row["longitude"],
             "timezone": row["timezone"],
-            "aliases": aliases,
+            "aliases": build_location_aliases(row, display_name),
             "source": "geonames",
+            "_match_rank": row["match_rank"],
+            "_kind_rank": row["kind_rank"],
+            "_country_priority": country_priority(row["country_code"]),
+            "_population": row["population"] or 0,
         })
 
     return results
@@ -276,22 +352,41 @@ def locations_search(q: str = "", limit: int = Query(10, ge=1, le=20)):
         for location in seed_locations
         if normalized_query in location_search_text(location)
     ]
-    seed_results = sorted(
-        seed_matches,
-        key=lambda location: score_location(location, normalized_query),
-    )
-
-    remaining_limit = limit - len(seed_results)
-    if remaining_limit <= 0:
-        return seed_results[:limit]
+    localized_country_codes = {name: code for code, name in COUNTRY_DISPLAY_NAMES_RU.items()}
+    seed_results = [
+        {
+            **location,
+            "aliases": clean_location_aliases(location.get("name"), location.get("aliases") or []),
+            "_match_rank": score_location(location, normalized_query),
+            "_kind_rank": 0,
+            "_country_priority": country_priority(localized_country_codes.get(location.get("country"), location.get("country"))),
+            "_population": 0,
+        }
+        for location in seed_matches
+    ]
 
     sqlite_results = [
         location
-        for location in search_sqlite_locations(normalized_query, remaining_limit + len(seed_locations))
+        for location in search_sqlite_locations(normalized_query, limit + len(seed_locations))
         if not sqlite_location_is_seed_duplicate(location, seed_locations)
     ]
 
-    return (seed_results + sqlite_results)[:limit]
+    ranked_results = sorted(
+        seed_results + sqlite_results,
+        key=lambda location: (
+            location["_match_rank"],
+            location["_kind_rank"],
+            location["_country_priority"],
+            -location["_population"],
+            0 if location["source"] == "seed" else 1,
+            location["name"],
+        ),
+    )[:limit]
+
+    return [
+        {key: value for key, value in location.items() if not key.startswith("_")}
+        for location in ranked_results
+    ]
 
 
 @app.get("/grahas")

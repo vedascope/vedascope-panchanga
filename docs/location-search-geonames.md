@@ -47,9 +47,19 @@ The generated SQLite database is intentionally ignored by git:
 1. `data/locations.seed.json`
 2. `data/locations.sqlite`
 
-Seed results rank above GeoNames results. This lets vedascope keep curated names,
-localized labels, or coordinates for important cities while using GeoNames for
-global coverage.
+Results first rank by match quality (exact, prefix, then contains), preferring a
+canonical match over an alternate-name match of the same type. Within equally
+direct matches, Russian cities rank first, followed by nearby/CIS countries,
+then other countries; population breaks ties within each group. Seed entries
+remain manual overrides for localized labels and coordinates, and duplicate
+GeoNames entries are omitted.
+
+When available, a Cyrillic alternate name is used as the display name. The
+canonical/ASCII spelling is retained in the bounded alias list. Common country
+codes are displayed in Russian; admin region codes remain unchanged.
+
+This behavior uses the existing `alternate_names`, `country_code`, and
+`population` columns, so an existing database does not need regeneration.
 
 If `data/locations.sqlite` is missing, the endpoint still works with seed data
 only.
@@ -60,7 +70,7 @@ Response shape remains compatible:
 {
   "id": "geonames:2759794",
   "name": "Amsterdam",
-  "country": "NL",
+  "country": "Нидерланды",
   "region": "NH",
   "latitude": 52.37403,
   "longitude": 4.88969,
@@ -78,6 +88,7 @@ GeoNames country and admin codes.
 ```bash
 cd /root/vedascope-panchanga
 python -m py_compile main.py scripts/import_geonames_locations.py
+# Regeneration is only needed when refreshing the underlying GeoNames data:
 python scripts/import_geonames_locations.py --out data/locations.sqlite
 sqlite3 data/locations.sqlite 'select count(*) from locations;'
 systemctl restart vedascope-panchanga.service
@@ -107,6 +118,6 @@ curl 'http://127.0.0.1:8000/locations/search?q=ташкент'
 
 ## TODO
 
-- Add localized country and region names.
+- Add localized region names.
 - Add external geocoder fallback with cache for places absent from `cities1000`.
 - Consider `alternateNamesV2.zip` for richer language-specific aliases.
