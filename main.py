@@ -9,9 +9,11 @@ import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 from astro.panchanga import calculate_panchanga
 from astro.chart import calculate_chart
+from astro.veda_clock import build_veda_clock_state
 
 from astro.south_chart import generate_south_indian_svg, generate_north_indian_svg
 
@@ -20,6 +22,13 @@ from astro.html_builder import build_panchanga_html
 
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_credentials=False,
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type"],
+)
 
 LOCATION_SEED_PATH = Path(__file__).resolve().parent / "data" / "locations.seed.json"
 LOCATION_DB_PATH = Path(__file__).resolve().parent / "data" / "locations.sqlite"
@@ -435,6 +444,27 @@ def grahas(
             for short_key, key, name in GRAHA_OUTPUT
         ],
     }
+
+
+@app.get("/api/v1/veda-clock/state")
+def veda_clock_state(
+    response: Response,
+    datetime: str | None = None,
+    lat: float = Query(55.7558, ge=-90, le=90),
+    lon: float = Query(37.6173, ge=-180, le=180),
+    timezone: str = "Europe/Moscow",
+    ayanamsha: str = "lahiri",
+    lang: str = "ru",
+):
+    response.headers["Cache-Control"] = "public, max-age=30"
+    return build_veda_clock_state(
+        datetime_value=datetime,
+        latitude=lat,
+        longitude=lon,
+        timezone=timezone,
+        ayanamsha=ayanamsha,
+        lang=lang,
+    )
 
 
 @app.get("/panchanga")

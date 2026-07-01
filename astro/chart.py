@@ -32,10 +32,10 @@ def is_retrograde_allowed(graha_name, speed):
     return speed < 0
 
 
-def calculate_chart(year, month, day, hour, minute, timezone, latitude, longitude):
+def calculate_chart(year, month, day, hour, minute, timezone, latitude, longitude, second=0):
     swe.set_sid_mode(swe.SIDM_LAHIRI)
 
-    local_hour = hour + minute / 60
+    local_hour = hour + minute / 60 + second / 3600
     utc_hour = local_hour - timezone
 
     jd = swe.julday(year, month, day, utc_hour)
